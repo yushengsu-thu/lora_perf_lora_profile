@@ -1,0 +1,40 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/huggingface_hub/constants.py:277: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+  warnings.warn(
+max_running_requests_per_dp=1331
+dp_size=1
+skip_max_running_requests_threshold=1331
+skip_token_capacity_threshold=11630144
+======== Warmup Begin ========
+Warmup with batch_size=[32]
+#Input tokens: 32768
+#Output tokens: 512
+batch size: 32
+input_len: 1024
+output_len: 16
+latency: 1.18 s
+input throughput: 29817.35 tok/s
+output throughput: 6185.45 tok/s
+last_ttft: 1.10 s
+last generation throughput: 3453.31 tok/s
+======== Warmup End   ========
+
+#Input tokens: 65536
+#Output tokens: 65536
+batch size: 32
+input_len: 2048
+output_len: 2048
+latency: 12.83 s
+input throughput: 31688.64 tok/s
+output throughput: 6088.72 tok/s
+last_ttft: 2.07 s
+last generation throughput: 6091.38 tok/s
+
+Results are saved to /tmp/dev_run/no-lora/bench/bs32.jsonl
+
+Input lens: [2048]. Output lens: [2048].
+|   batch size |   input len |   latency (s) |   input throughput (tok/s) |   output throughput (tok/s) | acc length   |   ITL (ms) |   input cost ($/1M) |   output cost ($/1M) | cache hit rate   |
+|--------------|-------------|---------------|----------------------------|-----------------------------|--------------|------------|---------------------|----------------------|------------------|
+|           32 |        2048 |         12.83 |                    31688.6 |                     6088.72 | n/a          |       5.26 |                0.05 |                 0.18 | n/a              |
+
