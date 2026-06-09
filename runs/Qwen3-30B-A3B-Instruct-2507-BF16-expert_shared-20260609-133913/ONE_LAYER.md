@@ -2,17 +2,17 @@
 
 ![one layer](lora_30b_one_layer.png)
 
-Both rows = **one transformer layer**, kernels packed by GPU-active time (input-`RMSNorm` →
-attention → `RMSNorm` → MoE → allreduce). Same x-scale.
+Both rows = **one transformer layer inside a real `step[DECODE bs=16]`** (anchored on the per-layer
+`fmha` attention), kernels packed by GPU-active time, same x-scale.
 
-- **no-lora (top): 0.35 ms/layer, 20 kernels.** The MoE is one **compact fused block** — the blue
-  `bmm` expert GEMM + `finalize`. Layout: RMSNorm(yellow) → qkv GEMM(purple) → attention(green) →
-  o GEMM(purple) → allreduce(gray) → RMSNorm → gate GEMM → **MoE core (blue)** → allreduce.
-- **lora-single (bottom): 1.32 ms/layer, 40 kernels (+0.98 ms).** Enabling LoRA replaces the compact
-  blue MoE with a sprawling **ORANGE = decomposed-MoE extra (permute / activation / count_and_sort /
-  fused_moe, 0.78 ms)** + **RED = LoRA GEMMs (shrink/expand/sgemm, 0.20 ms)** region.
+- **no-lora (top): 96 µs/layer, 13 kernels.** Compact: attention(green) → O-proj GEMM(purple) →
+  allreduce(gray, fused: +residual+RMSNorm) → gate GEMM → **fused MoE core (blue `bmm`)** → allreduce.
+- **lora-single (bottom): 158 µs/layer, 33 kernels (+62 µs).** In the MoE region LoRA inserts
+  **RED = LoRA GEMMs (37 µs:** `_sgemm_lora_a/b`, `_moe_lora_shrink/expand`, `_qkv_lora_b`**)** and
+  **ORANGE = decomposed-MoE extra (23 µs:** `fused_moe`, `moe_align`, `activation`, `permute`**)**, and
+  the blue fused core shrinks. The attention half (green + purple) is unchanged.
 
-**Takeaway:** per layer, LoRA's own matmuls (red, 0.20 ms) are small; the bulk of the +0.98 ms is the
-**ORANGE decomposed-MoE overhead** — the MoE leaving the fused path. That's the optimization target
-(re-fuse activation/permute into the GEMM; see `OPTIMIZATION.md`). The attention half of the layer
-(green + purple) is unchanged by LoRA.
+## Takeaway (DECODE)
+At decode, the +62 µs/layer splits **LoRA GEMMs (37 µs) ≳ decomp-extra (23 µs)** — they're comparable,
+LoRA GEMMs slightly larger. **`activation` and `permute` are tiny at decode** (they only blow up in
+PREFILL, where 4096 tokens flow through them). See `OPTIMIZATION.md`.
