@@ -2,37 +2,46 @@
 
 ![how to read](lora_30b_howto_read.png)
 
-Open any `*/bs*-TP-0.trace.json.gz` in **https://ui.perfetto.dev** (or chrome://tracing). Look at the
-**GPU track** (CUDA stream — here `stream 128` is the main stream; the kernels live there).
+Open `*/bs16-TP-0.trace.json.gz` in **https://ui.perfetto.dev**. There are two useful tracks: the
+**NVTX annotation track** (step ranges) and the **GPU/CUDA stream track** (kernels, here `stream 128`).
 
-## One decode step
-A decode step = **one forward pass** that emits **1 token per sequence**. Its kernel sequence is:
+## Use the NVTX `step[...]` ranges — don't count kernels
+The trace already annotates every step:
+- **`step[DECODE bs=16]`** — a real decode step (this run has **4** of them).
+- **`step[EXTEND bs=2 toks=4096]`** — a prefill chunk (this run has **8**; they dominate the window).
+- `## Call CompiledFxGraph … ##` — the cuda-graph replay; **one decode step = one graph replay**.
 
+So **a decode step = one `step[DECODE bs=16]` range**. (NVTX is step-level only — there is **no**
+per-layer / per-module NVTX, so layer/attention/MoE labels below come from kernel names.)
+
+## Timing is real per decode step
+Each `step[DECODE bs=16]` ≈ **7.5 ms** for lora-single — which **matches the non-profiled bench
+(2125 tok/s = 16/7.5 ms)**. So per-decode-step timing in the trace is representative. (The profiled
+*run's* overall throughput is low only because of profiler setup/flush + the 8 prefill chunks; the
+individual decode steps run at normal speed.)
+
+## Inside one decode step: 48 layers
+The per-layer block repeats **×48** (count `moe::dev::routing::routingCustom::routingIndices` → 48, or
+`fmha` attention → 48). Per-layer kernels (cuda-graph ON, decode):
 ```
-[step head] logits-AllGather → sample(argmax) → embed-lookup → compute-position
-   └─ ×48 (one per transformer layer):  RMSNorm → attention (qkv/attn/o) → RMSNorm
-                                          → MoE (router → permute → experts GEMM → finalize)
-                                          → allreduce (TP)
-[step tail] final RMSNorm → lm_head GEMM → logits-AllGather → sample  → (next step)
+attention(fmhaSm100f, paged-KV) → O-proj GEMM(nvjet) → allreduce(trtllm_allreduce_fusion, also does residual+RMSNorm)
+   → gate GEMM(nvjet) → router(routingCustom) → expert GEMM(bmm_Bfloat16) → finalize → allreduce → (next layer)
 ```
-
-## How to find the step boundary yourself
-Count how many times each kernel fires in the profiled window, then:
-- **fires N× (N = number of profiled steps)** → it's a **once-per-step** kernel = a **step marker**.
-  Here the profiled window = **12 steps**, and `ncclDevKernel_AllGather_RING_LL` (the logits/vocab
-  all-gather) + the sampling `reduce_kernel` fire exactly **12×** → the gap between two of them is **one step**.
-- **fires N×48** → **once-per-layer-per-step** (here `moe::dev::routing` fires 576× = 12×48) → tells you the model has **48 layers**, and the layer block is what repeats inside a step.
-
-So: **step boundary = the logits AllGather (or the sampling kernel)**; everything between two of them is one step; inside it the layer block repeats 48×.
+**Note:** RMSNorm is **fused into the `trtllm_allreduce_fusion` kernel** (only ~2 standalone `RMSNorm`
+in a whole step), so the layer marker is `fmha` (attention) or the router, not a norm.
 
 ## The figure
-- **Panel A** — the full profiled window. Each **dashed line = one logits-AllGather (once per step)**; the gap between two dashes = **one decode step** (12 steps captured).
-- **Panel B** — one step, kernels **packed by GPU-active time** (gaps removed), colored by phase. You can see the **MoE (blue) + attention (green) + norm (orange) + allreduce (red)** pattern repeat ×48, bracketed by the step head (left, red TP comm) and tail (right, lm_head GEMM + AllGather + sample).
+- **Panel A** — the NVTX step ranges. GREEN = the 4 `step[DECODE bs=16]`; GRAY = the 8 `step[EXTEND]`
+  prefill chunks (much longer). Decode steps are the short green ones at the end.
+- **Panel B** — one decode step, kernels packed by GPU-active time, colored by phase (real kernel
+  names in the legend). The MoE+attention block repeats ×48.
 
-## ⚠️ Timing caveat
-These traces are from the **profiled** run (torch profiler active), so the **wall-clock per step is inflated** (trace shows ~tens of ms/step; the real served decode is ~3.7 ms/step = 4273 tok/s from the non-profiled bench). **Read the trace for kernel structure & composition, not absolute latency.** Per-kernel GPU *durations* are real; the gaps between kernels are profiler/launch-inflated — which is also why **allreduce looks huge** (spin-wait inflated), and why our analysis excludes it and uses non-allreduce GPU time + the non-profiled bench tok/s.
+## ⚠️ Caveat (allreduce)
+`trtllm_allreduce_fusion` / `all_reduce_one_shot_push_kernel` durations are **spin-wait inflated**
+(they wait for peer ranks). They look huge but aren't real compute — our analysis excludes them and
+uses non-allreduce GPU time + the non-profiled bench tok/s.
 
 ## For the LoRA cells
-Same step structure, but the MoE block is **decomposed** (extra standalone `permute` / `activation` /
-`count_and_sort` / `fused_moe` + the `_lora_*` GEMMs) instead of the fused `bmm`+`finalize` you see in
-no-lora — that decomposition is the bulk of the LoRA overhead (see `OPTIMIZATION.md`).
+Same step/layer structure; the MoE part gains the decomposed kernels (`permute`, `activation`,
+`count_and_sort`, `moe_align`, `fused_moe`) **and** the `_sgemm_lora_*` / `_moe_lora_*` GEMMs — see
+`ONE_LAYER.md` and `OPTIMIZATION.md`.
