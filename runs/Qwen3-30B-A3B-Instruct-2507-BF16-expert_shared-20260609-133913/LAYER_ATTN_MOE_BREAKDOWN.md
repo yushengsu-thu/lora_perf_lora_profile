@@ -28,12 +28,12 @@ real benefit is **wall-clock**: decode +17% (2125→2481 tok/s ≈ −23 µs/lay
 
 ## ② MoE sublayer:  base ~50 µs → LoRA ~96 µs  (+46 µs)
 
-| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization | url | MoE-decomp extra — components (µs/layer) |
+| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization | MoE-decomp extra — components (µs/layer) | url |
 |---|---|---|---|---|---|---|---|
 | MoE core (bmm expert GEMM / router / finalize) | 36.3 | 34.2 | ~0 | 0 | — | | |
 | gate GEMM (nvjet) + allreduce (after MoE) | ~14 | ~14 | ~0 | 0 | — | | |
 | routing (`routingCustom`) — **not LoRA-added** | 5.1 | 4.4 | −0.6 | 0 | — | | |
-| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (FP8 has it, BF16 doesn't) + fuse routing/align/topk/elem | | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) |
+| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (FP8 has it, BF16 doesn't) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) | |
 | LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | fold into expert GEMM | | |
 | LoRA shrink A (shared_expert part) | 0 | ~7.4 | +7.4 | ~0 | cuBLAS / fuse | | |
 | LoRA MoE expand (routed experts) | 0 | 3.4 | +3.4 | ~0 | fold into expert GEMM | | |
