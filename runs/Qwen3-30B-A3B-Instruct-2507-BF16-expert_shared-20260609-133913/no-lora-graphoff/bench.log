@@ -1,0 +1,46 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/huggingface_hub/constants.py:277: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+  warnings.warn(
+max_running_requests_per_dp=4096
+dp_size=1
+skip_max_running_requests_threshold=4096
+skip_token_capacity_threshold=8963328
+======== Warmup Begin ========
+Warmup with batch_size=[16]
+#Input tokens: 16384
+#Output tokens: 256
+batch size: 16
+input_len: 1024
+output_len: 16
+latency: 1.06 s
+input throughput: 63674.26 tok/s
+output throughput: 317.49 tok/s
+last_ttft: 0.26 s
+last generation throughput: -1.00 tok/s
+======== Warmup End   ========
+
+#Input tokens: 32768
+#Output tokens: 1024
+batch size: 16
+input_len: 2048
+output_len: 64
+latency: 4.33 s
+input throughput: 146842.61 tok/s
+output throughput: 249.34 tok/s
+last_ttft: 0.22 s
+last generation throughput: 23.38 tok/s
+#Input tokens: 32768
+#Output tokens: 1024
+Dump profiling traces to /tmp/dev_run/no-lora-graphoff/profile/1780980083.8141427
+Waiting for 12 steps and the trace to be flushed.... (profile_by_stage=False)
+batch size: 16
+input_len: 2048
+output_len: 64
+latency: 8.90 s
+input throughput: 52661.94 tok/s
+output throughput: 123.67 tok/s
+last_ttft: 0.62 s
+last generation throughput: 58.50 tok/s
+
+Results are saved to /tmp/dev_run/no-lora-graphoff/profile/bench.jsonl
