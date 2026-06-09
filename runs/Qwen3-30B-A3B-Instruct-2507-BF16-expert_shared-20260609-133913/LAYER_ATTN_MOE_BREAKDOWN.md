@@ -13,28 +13,30 @@ every group**: two-stream *overlaps* work (concurrent side stream), it does **no
 time — on this BF16 path only ~3% of LoRA moves to side streams (11 ms of ~360 ms, whole-trace). Its
 real benefit is **wall-clock**: decode +17% (2125→2481 tok/s ≈ −23 µs/layer) via latency hiding.
 
+`url` = (to fill) the optimization commit/PR that addresses this row.
+
 ## ① Attention sublayer:  base ~42 µs → LoRA ~55 µs  (+13 µs)
 
-| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization |
-|---|---|---|---|---|---|
-| attention fmha | 10.4 | 10.4 | ~0 | 0 | — |
-| dense GEMM nvjet (qkv/o) | ~24 | ~24 | ~0 | 0 | — |
-| allreduce (after attn) | ~8 | ~8 | ~0 | 0 | — |
-| LoRA qkv_b expand | 0 | 4.2 | +4.2 | ~0 | cuBLAS expand |
-| LoRA shrink A (q/k/v/o part) | 0 | ~4.2 | +4.2 | ~0 | fuse q/k/v shrink into one GEMM + cuBLAS |
-| LoRA expand B (o part) | 0 | ~5.0 | +5.0 | ~0 | cuBLAS; fuse fp32→bf16 cast into expand |
+| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization | url |
+|---|---|---|---|---|---|---|
+| attention fmha | 10.4 | 10.4 | ~0 | 0 | — | |
+| dense GEMM nvjet (qkv/o) | ~24 | ~24 | ~0 | 0 | — | |
+| allreduce (after attn) | ~8 | ~8 | ~0 | 0 | — | |
+| LoRA qkv_b expand | 0 | 4.2 | +4.2 | ~0 | cuBLAS expand | |
+| LoRA shrink A (q/k/v/o part) | 0 | ~4.2 | +4.2 | ~0 | fuse q/k/v shrink into one GEMM + cuBLAS | |
+| LoRA expand B (o part) | 0 | ~5.0 | +5.0 | ~0 | cuBLAS; fuse fp32→bf16 cast into expand | |
 
 ## ② MoE sublayer:  base ~50 µs → LoRA ~96 µs  (+46 µs)
 
-| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization | MoE-decomp extra — components (µs/layer) |
-|---|---|---|---|---|---|---|
-| MoE core (bmm expert GEMM / router / finalize) | 36.3 | 34.2 | ~0 | 0 | — | |
-| gate GEMM (nvjet) + allreduce (after MoE) | ~14 | ~14 | ~0 | 0 | — | |
-| routing (`routingCustom`) — **not LoRA-added** | 5.1 | 4.4 | −0.6 | 0 | — | |
-| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (FP8 has it, BF16 doesn't) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) |
-| LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | fold into expert GEMM | |
-| LoRA shrink A (shared_expert part) | 0 | ~7.4 | +7.4 | ~0 | cuBLAS / fuse | |
-| LoRA MoE expand (routed experts) | 0 | 3.4 | +3.4 | ~0 | fold into expert GEMM | |
+| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization | url | MoE-decomp extra — components (µs/layer) |
+|---|---|---|---|---|---|---|---|
+| MoE core (bmm expert GEMM / router / finalize) | 36.3 | 34.2 | ~0 | 0 | — | | |
+| gate GEMM (nvjet) + allreduce (after MoE) | ~14 | ~14 | ~0 | 0 | — | | |
+| routing (`routingCustom`) — **not LoRA-added** | 5.1 | 4.4 | −0.6 | 0 | — | | |
+| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (FP8 has it, BF16 doesn't) + fuse routing/align/topk/elem | | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) |
+| LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | fold into expert GEMM | | |
+| LoRA shrink A (shared_expert part) | 0 | ~7.4 | +7.4 | ~0 | cuBLAS / fuse | | |
+| LoRA MoE expand (routed experts) | 0 | 3.4 | +3.4 | ~0 | fold into expert GEMM | | |
 
 (~+6 µs/layer of elementwise/reshape from the decomposed path is split across both sublayers. The
 "MoE-decomp extra" components sum to ~+29 µs incl. routing≈0; the headline +26 µs excludes the LoRA
