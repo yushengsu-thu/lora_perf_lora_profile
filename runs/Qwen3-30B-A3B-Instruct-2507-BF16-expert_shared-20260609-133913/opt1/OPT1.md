@@ -31,16 +31,24 @@ align/sort cost. Now it takes the single fused launch.
 A/B = `SGLANG_OPT_LORA_FUSED_MERGED_ALIGN` `0` vs `1`. (NB: the flag **defaults True** — a real
 baseline must set `=0`.) Both cells produce identical coherent decode.
 
-## Mechanism (graph-OFF, kernel structure) — `profile/`, `opt1_before_after.png`
-| kernel | off | on |
-|---|---|---|
-| `moe_align_block_size_small_batch` | 384 launches | **0 (eliminated)** |
-| `fused_align_scatter` (fused single-launch) | 0 | 576 |
-| `_fused_virtual_topk_ids` | 2112 | 1536 |
+## Mechanism — which kernels are removed (`opt1_before_after.png`, `profile/`)
+The figure is drawn from the **eager (graph-OFF) traces** in `profile/` — the routing/align cluster
+of one MoE-LoRA layer, on the main stream:
 
-The red-circled bar in `opt1_before_after.png` is the eliminated `moe_align_block_size_small_batch`.
-(graph-OFF durations are eager-mode launch-latency — used for structure only; timing is the
-graph-ON bench above.)
+| | routing/align kernels on the main stream |
+|---|---|
+| **BEFORE** (flag off) | `_moe_lora_shrink_splitk` → `_fused_virtual_topk_ids` → `moe_align_block_size_small_batch` → `fused_moe_kernel` |
+| **AFTER** (opt1 on) | the `_fused_virtual_topk_ids` + `moe_align_block_size_small_batch` pair is replaced by a **single `fused_align_scatter`** |
+
+Whole-trace counts confirm it: `moe_align_block_size_small_batch` **384 → 0 launches**,
+`fused_align_scatter` **0 → 576**.
+
+> **Why eager and not cuda-graph for the figure:** the timing win above is cuda-graph (production).
+> But the torch profiler `--profile` *under cuda-graph* does not expose the fused routing kernels —
+> the before/after cuda-graph traces come out byte-identical (a profiler×graph-replay artifact), so
+> they can't visualize the removal. The eager trace exercises the *same code path* and shows it
+> directly. The cuda-graph **bench** (no profiler) is what proves the +11% timing.
+> (`profile/` durations are eager launch-latency — structure only; timing is the cuda-graph bench.)
 
 ## Correctness & guardrail (FP8/NVFP4)
 The routing change is **dtype-independent** (topk_ids + token_lora_mapping → routing tensors).
@@ -55,7 +63,8 @@ and shared by FP8/NVFP4, so this is on-by-default for them — covered by the eq
 A direct FP8/NVFP4 e2e perf bench (dedicated pods; Kimi is 2-node) is the optional heavier follow-up.
 
 ## Artifacts
-- `summary.md` — bench A/B (prefill/decode/e2e, off vs on)
-- `opt1_before_after.png` — annotated before/after (decode win + eliminated kernel red-circled)
-- `profile/{off,on}/bs16-TP-0.trace.json.gz` — graph-OFF kernel-structure traces
-- `off/`, `on/` — per-bs bench jsonl/log/serverlog
+- `OPT1.md` — this summary
+- `summary.md` — cuda-graph bench A/B (prefill/decode/e2e, flag off vs on)
+- `opt1_before_after.png` — annotated before/after timeline (removed align kernels red-circled)
+- `profile/off/bs16-TP-0.trace.json.gz` — eager trace, **BEFORE** (flag OFF, unfused align) — open in perfetto
+- `profile/on/bs16-TP-0.trace.json.gz`  — eager trace, **AFTER**  (flag ON, fused align)
