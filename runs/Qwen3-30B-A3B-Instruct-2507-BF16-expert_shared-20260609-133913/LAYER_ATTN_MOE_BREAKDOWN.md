@@ -33,7 +33,7 @@ real benefit is **wall-clock**: decode +17% (2125→2481 tok/s ≈ −23 µs/lay
 | MoE core (bmm expert GEMM / router / finalize) | 36.3 | 34.2 | ~0 | 0 | — | | |
 | gate GEMM (nvjet) + allreduce (after MoE) | ~14 | ~14 | ~0 | 0 | — | | |
 | routing (`routingCustom`) — **not LoRA-added** | 5.1 | 4.4 | −0.6 | 0 | — | | |
-| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (FP8 has it, BF16 doesn't) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) | 1. [opt1 — align/sort fusion: decode +11% bs16](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea)<br>2. [opt2 — topk/pack: decode +5.6% bs16](https://github.com/yushengsu-thu/lora_perf_lora_profile/tree/main/runs/Qwen3-30B-A3B-Instruct-2507-BF16-expert_shared-20260609-133913/opt2) _(flag-only, no code commit)_<br>3. [opt3 — drop elem/upcast + lean `_get_lora_info`: no clear win](https://github.com/yushengsu-thu/sglang/commit/1536c6e4e65515f5ee7403c48b0726d55307d430) |
+| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (bf16 = **NVFP4 sibling**, decomposed + missing-unfused-cubin wall → **NOT a port of FP8**; bf16-only CUTLASS-EVT GEMM1 epilogue, no quant to fuse into) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) | 1. [opt1 — align/sort fusion: decode +11% bs16](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea)<br>2. [opt2 — topk/pack: decode +5.6% bs16](https://github.com/yushengsu-thu/lora_perf_lora_profile/tree/main/runs/Qwen3-30B-A3B-Instruct-2507-BF16-expert_shared-20260609-133913/opt2) _(flag-only, no code commit)_<br>3. [opt3 — drop elem/upcast + lean `_get_lora_info`: no clear win](https://github.com/yushengsu-thu/sglang/commit/1536c6e4e65515f5ee7403c48b0726d55307d430) |
 | LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | fold into expert GEMM | | |
 | LoRA shrink A (shared_expert part) | 0 | ~7.4 | +7.4 | ~0 | cuBLAS / fuse | | |
 | LoRA MoE expand (routed experts) | 0 | 3.4 | +3.4 | ~0 | fold into expert GEMM | | |
@@ -57,8 +57,14 @@ shrink/expand GEMM rows.)
 overhead (~67%)**.
 
 ## Recommended order (decode, bs16)
-1. **in-MoE LoRA fold** — biggest structural win (~25 µs); proven on the FP8 path (port `sgl_fp8_moe.py`
-   / dev-kernel to BF16).
+1. **in-MoE LoRA fold** — biggest structural win (~25 µs; **post-opt1/opt2 the remaining MoE-decomp
+   extra is ~13 µs** = fused_moe 7.2 + activation 3.2 + permute 2.4, all fold-only — align/sort taken
+   by opt1, topk/pack+elem by opt2). **bf16 is the NVFP4 sibling**, NOT FP8: both bf16 and NVFP4 are
+   decomposed and hit the *missing-unfused-cubin wall*, so this is **NOT a port of `sgl_fp8_moe.py`**
+   (FP8 isn't truly "folded" — it only keeps permute fused). NVFP4 gets the fold by fusing
+   activation+quant (`launchFusedActivationQuant` → `activated_bf16` never hits HBM); **bf16 has no
+   quant**, so the equivalent is **fuse SwiGLU+lora into the GEMM1 epilogue (CUTLASS-EVT, bf16-only)**
+   — kills the standalone `permute` + the `activated_bf16` HBM round-trip (ref §5/§6).
 2. **align/sort/scatter fusion** (~10 µs) — largest (a) item; fixed-cost at small batch → decode benefits
    disproportionately. ✅ **DONE — [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea): decode +11.0/9.9/8.8% (bs16/32/64), e2e −9%, prefill flat; `moe_align_block_size_small_batch` 384→0 launches.** See `opt1/`.
 3. **topk+pack single launch** (~3 µs) + **drop elem/upcast / `_get_lora_info`** (~4 µs) — PR #27329 /
