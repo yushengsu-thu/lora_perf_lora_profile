@@ -21,15 +21,23 @@ Before opt1, `shared_outer` fell through to the unfused fallback
 (`_fused_virtual_topk_ids` + `moe_align_block_size_small_batch`) — the breakdown's ~10.2 µs/layer
 align/sort cost. Now it takes the single fused launch.
 
-## Bench (graph-ON, real timing) — see `summary.md`
-| bs | decode off→on | Δ decode | e2e | prefill |
-|---|---|---|---|---|
-| 16 | 2315 → 2569 tok/s | **+11.0%** | −9.2% | flat |
-| 32 | 4228 → 4647 tok/s | **+9.9%** | −8.2% | flat |
-| 64 | 7290 → 7929 tok/s | **+8.8%** | −7.1% | flat |
+## Bench — single × two-stream matrix (graph-ON, decode bs16) — `summary.md`, `opt1_matrix.png`
+| decode tok/s @bs16 | single-stream | two-stream (default) |
+|---|---|---|
+| opt1 OFF | 2010 | 2314 |
+| opt1 ON | 2116 | 2565 |
+| **opt1 effect** | **+5.3%** | **+10.8%** |
 
-A/B = `SGLANG_OPT_LORA_FUSED_MERGED_ALIGN` `0` vs `1`. (NB: the flag **defaults True** — a real
-baseline must set `=0`.) Both cells produce identical coherent decode.
+opt1 helps **more under two-stream** (+10.8% vs +5.3%): two-stream overlaps the gate_up LoRA shrink/
+expand onto a side stream, so the routing/align becomes a larger share of the main-stream critical
+path — removing it pays off more. two-stream alone: +15% (off) → +21% (on). **opt1 + two-stream
+stacked: 2010 → 2565 = +27.6%.** Full bs16/32/64 × off/on × single/two table in `summary.md`.
+
+> two-stream is **default-on for decode** (`SGLANG_TWO_STREAM_MAX_TOKENS=256`, installed whenever
+> `SGLANG_EXPERIMENTAL_LORA_OPTI=1`); `single` = set `SGLANG_TWO_STREAM_MAX_TOKENS=0`.
+
+A/B = `SGLANG_OPT_LORA_FUSED_MERGED_ALIGN` `0` vs `1` (also defaults True — baseline must set `=0`).
+All cells produce identical coherent decode.
 
 ## Mechanism — which kernels are removed (`opt1_before_after.png`, `profile/`)
 The figure is drawn from the **eager (graph-OFF) traces** in `profile/` — the routing/align cluster
