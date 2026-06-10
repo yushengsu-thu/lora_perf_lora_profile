@@ -19,16 +19,20 @@ This machinery already exists. `experimental_sgl_trtllm` reaches the fused-pack 
 meets its conditions (128 experts = power-of-2 ≤512, softmax, no correction-bias, no shared
 experts, no EPLB) — so it is on by default. **opt2 is the validation + measurement of that path.**
 
-## Bench (graph-ON, real timing) — `summary.md`
-A/B = `SGLANG_OPT_LORA_FUSED_TOPK_PACK` `0` vs `1` (opt1's fused-align held on for both, isolating opt2).
-| bs | decode off→on | Δ decode | e2e | prefill |
-|---|---|---|---|---|
-| 16 | 2422 → 2559 tok/s | **+5.6%** | −5.1% | flat |
-| 32 | 4453 → 4612 tok/s | +3.6% | −2.8% | flat |
-| 64 | 7690 → 7925 tok/s | +3.1% | −3.0% | flat |
+## Bench — single × two-stream matrix (graph-ON, decode bs16) — `summary.md`, `opt2_matrix.png`
+| decode tok/s @bs16 | single-stream | two-stream (default) |
+|---|---|---|
+| opt2 OFF | 2046 | 2437 |
+| opt2 ON | 2118 | 2555 |
+| **opt2 effect** | **+3.5%** | **+4.8%** |
 
-Fixed-cost kernels → smaller batches benefit most. Both cells produce identical coherent decode.
-(NB: the flag **defaults True** — a real baseline must set `=0`.)
+Like opt1, opt2 helps slightly more under two-stream (+4.8% vs +3.5%). two-stream alone: +19% (off)
+→ +21% (on). **opt2 + two-stream stacked: 2046 → 2555 = +24.9%.** Full bs16/32/64 × off/on ×
+single/two table in `summary.md`. A/B = `SGLANG_OPT_LORA_FUSED_TOPK_PACK` `0` vs `1` (opt1's
+fused-align held on for both; flag also defaults True — baseline must set `=0`). Fixed-cost kernels
+→ smaller batches benefit most; all cells identical coherent decode.
+
+> two-stream is **default-on for decode** (`SGLANG_TWO_STREAM_MAX_TOKENS=256`); `single` = set it `=0`.
 
 ## Mechanism (eager/graph-OFF, kernel structure) — `profile/`, `opt2_before_after.png`
 | kernel category | off | on |
