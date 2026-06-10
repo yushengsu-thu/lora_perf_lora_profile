@@ -22,8 +22,9 @@ Two configs:
 **lora / base:** decode 65.5 / 67.7 / 69.0% · prefill ~19% · e2e 1.60–1.67×.
 (decode is two-stream; prefill is always serial — in=2048 > the 256-token two-stream gate.)
 
-## Profiling (`profile/{base,lora}/bs{16,32,64}-TP-0.trace.json.gz`)
-Torch profiler (CPU+GPU), **cuda-graph ON** decode window (start-step 8, 16 steps), TP0.
+## Profiling (`profile/{base,lora}/bs16-TP-{0,1,2,3}.trace.json.gz`)
+Torch profiler (CPU+GPU), **cuda-graph ON** decode window (start-step 8, 16 steps), **bs16**, with
+**all 4 TP ranks (TP0–TP3) as separate files**.
 - `profile/base/` — base (no-LoRA), cuda-graph.
 - `profile/lora/` — lora, cuda-graph + two-stream.
-Open in perfetto / `ui.perfetto.dev`.
+Open each per-rank `.gz` in perfetto / `ui.perfetto.dev`.
