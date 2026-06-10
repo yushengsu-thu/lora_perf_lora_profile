@@ -33,7 +33,7 @@ real benefit is **wall-clock**: decode +17% (2125→2481 tok/s ≈ −23 µs/lay
 | MoE core (bmm expert GEMM / router / finalize) | 36.3 | 34.2 | ~0 | 0 | — | | |
 | gate GEMM (nvjet) + allreduce (after MoE) | ~14 | ~14 | ~0 | 0 | — | | |
 | routing (`routingCustom`) — **not LoRA-added** | 5.1 | 4.4 | −0.6 | 0 | — | | |
-| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (FP8 has it, BF16 doesn't) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) | |
+| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (FP8 has it, BF16 doesn't) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific)<br>• **fused_moe +7.2** (expert GEMM, replaces `bmm`)<br>• **elem / copy / cast +3.9** (upcast / copy)<br>• **activation +3.2** (`moe::dev::activation`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`)<br>• **permute +2.4** (`moe::dev::permute`) | [opt1 (align/sort): decode +11% bs16](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea) |
 | LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | fold into expert GEMM | | |
 | LoRA shrink A (shared_expert part) | 0 | ~7.4 | +7.4 | ~0 | cuBLAS / fuse | | |
 | LoRA MoE expand (routed experts) | 0 | 3.4 | +3.4 | ~0 | fold into expert GEMM | | |
@@ -60,7 +60,7 @@ overhead (~67%)**.
 1. **in-MoE LoRA fold** — biggest structural win (~25 µs); proven on the FP8 path (port `sgl_fp8_moe.py`
    / dev-kernel to BF16).
 2. **align/sort/scatter fusion** (~10 µs) — largest (a) item; fixed-cost at small batch → decode benefits
-   disproportionately.
+   disproportionately. ✅ **DONE — [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea): decode +11.0/9.9/8.8% (bs16/32/64), e2e −9%, prefill flat; `moe_align_block_size_small_batch` 384→0 launches.** See `opt1/`.
 3. **topk+pack single launch** (~3 µs) + **drop elem/upcast / `_get_lora_info`** (~4 µs) — PR #27329 /
    team action items; cheap, additive.
 
