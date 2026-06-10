@@ -63,6 +63,10 @@ overhead (~67%)**.
    disproportionately. ✅ **DONE — [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea): decode +11.0/9.9/8.8% (bs16/32/64), e2e −9%, prefill flat; `moe_align_block_size_small_batch` 384→0 launches.** See `opt1/`.
 3. **topk+pack single launch** (~3 µs) + **drop elem/upcast / `_get_lora_info`** (~4 µs) — PR #27329 /
    team action items; cheap, additive.
+   - **topk+pack ✅ DONE — opt2** (`SGLANG_OPT_LORA_FUSED_TOPK_PACK`, already wired/default-on): fuses
+     `_pack_topk_for_flashinfer_routed` (cast/`<<16`/`|`) into the gating kernel → **decode +5.6%/3.6%/3.1%
+     (bs16/32/64)**, `BinaryFunctor` 576→0, `bitwise` 12→0, total launches 24178→21874. See `opt2/`.
+   - drop elem/upcast / `_get_lora_info` — still open.
 
 bs16 is latency / fixed-cost bound — which is why these small routing/align/elem kernels matter at
 decode. allreduce excluded from GPU-active analysis (spin-wait inflated). Numbers are one steady
