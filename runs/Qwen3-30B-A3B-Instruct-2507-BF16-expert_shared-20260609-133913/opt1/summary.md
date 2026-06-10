@@ -1,18 +1,27 @@
-# opt1 A/B — SGLANG_OPT_LORA_FUSED_MERGED_ALIGN off vs on (LoRA cell, shared_outer)
+# single×two matrix — SGLANG_OPT_LORA_FUSED_MERGED_ALIGN off/on × stream
 
-| variant | bs | prefill tok/s | decode tok/s | ITL ms | e2e s |
+| flag | stream | bs | prefill tok/s | decode tok/s | e2e s |
 |---|---|---|---|---|---|
-| off | 16 | 35925.4 | 2315.2 | — | 15.1 |
-| off | 32 | 35381.7 | 4228.4 | — | 17.4 |
-| off | 64 | 35456.1 | 7290.2 | — | 21.7 |
-| on | 16 | 35680.6 | 2568.8 | — | 13.7 |
-| on | 32 | 35788.8 | 4646.9 | — | 15.9 |
-| on | 64 | 36388.7 | 7929.1 | — | 20.1 |
+| off | single | 16 | 34910.1 | 2010.1 | 17.2 |
+| off | single | 32 | 35569.7 | 3712.0 | 19.5 |
+| off | single | 64 | 35386.8 | 6414.6 | 24.1 |
+| off | two | 16 | 35392.1 | 2314.4 | 15.1 |
+| off | two | 32 | 35912.7 | 4217.5 | 17.4 |
+| off | two | 64 | 35687.7 | 7301.8 | 21.6 |
+| on | single | 16 | 35207.2 | 2115.7 | 16.4 |
+| on | single | 32 | 35779.6 | 3950.7 | 18.4 |
+| on | single | 64 | 36376.0 | 6883.9 | 22.6 |
+| on | two | 16 | 34895.6 | 2565.3 | 13.7 |
+| on | two | 32 | 35167.0 | 4641.7 | 16.0 |
+| on | two | 64 | 35797.9 | 7946.6 | 20.2 |
 
-on/off ratio (prefill & decode: >100%=opt1 faster; e2e: <100%=opt1 faster)
+## decode tok/s matrix (rows=flag, cols=stream)
 
-| bs | prefill | decode | e2e |
-|---|---|---|---|
-| 16 | 99.3% | 111.0% | 90.8% |
-| 32 | 101.2% | 109.9% | 91.8% |
-| 64 | 102.6% | 108.8% | 92.9% |
+| flag \\ stream | single | two |
+|---|---|---|
+| off (bs16) | 2010.1 | 2314.4 |
+| on (bs16) | 2115.7 | 2565.3 |
+
+## opt effect (on/off) per stream, decode bs16
+- single-stream: 105.3%
+- two-stream:    110.8%
