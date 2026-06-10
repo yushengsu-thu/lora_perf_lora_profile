@@ -66,7 +66,12 @@ overhead (~67%)**.
    - **topk+pack ✅ DONE — opt2** (`SGLANG_OPT_LORA_FUSED_TOPK_PACK`, already wired/default-on): fuses
      `_pack_topk_for_flashinfer_routed` (cast/`<<16`/`|`) into the gating kernel → **decode +5.6%/3.6%/3.1%
      (bs16/32/64)**, `BinaryFunctor` 576→0, `bitwise` 12→0, total launches 24178→21874. See `opt2/`.
-   - drop elem/upcast / `_get_lora_info` — still open.
+   - **drop elem/upcast / `_get_lora_info` — investigated & measured (opt3): no clear win**
+     ([opt3](https://github.com/yushengsu-thu/lora_perf_lora_profile/tree/main/runs/Qwen3-30B-A3B-Instruct-2507-BF16-expert_shared-20260609-133913/opt3)).
+     opt2 already removed the elem/copy bulk (the pack's cast/shift/or chain); residual
+     activation-vec (`SGLANG_OPT_FUSED_MOE_ACTIVATION_VEC`) + lean `_get_lora_info` gains are within
+     run-to-run noise (prefill ~±few %, decode ~0). Low-ROI; remaining copies live in the decomposed
+     `.cu` op → the in-MoE fold. **Next real headroom: in-MoE fold (the big ① item).**
 
 bs16 is latency / fixed-cost bound — which is why these small routing/align/elem kernels matter at
 decode. allreduce excluded from GPU-active analysis (spin-wait inflated). Numbers are one steady
