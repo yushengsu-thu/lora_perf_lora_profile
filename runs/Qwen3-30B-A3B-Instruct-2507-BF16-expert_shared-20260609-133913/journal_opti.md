@@ -47,7 +47,7 @@ current state, plus the planned next steps.
     side-capture the activation kernel writes for the down-proj LoRA shrink — fp8/fp4 *must*
     write that bf16 copy (their activated output is quantized); for bf16 it's pure redundancy
     (~50 MB/layer extra HBM write at prefill, ≈half the activation kernel's write traffic);
-  - and it is the reason the EVT fold (F3) is feasible at all: bf16 accum + bf16 Δ → SwiGLU
+  - and it is the reason the EVT fold (opt7) is feasible at all: bf16 accum + bf16 Δ → SwiGLU
     → bf16 out needs no per-expert/per-token scale bookkeeping in the epilogue.
   **Caveat:** sharing adds a dependency on the main-stream permute/activation — at decode this
   would serialize what two-stream currently overlaps. Apply the sharing on the **prefill path
@@ -139,32 +139,39 @@ Selection criteria (user directive 2026-06-11): (1) prefer dtype-common fp8/nvfp
 triplet + single×two matrix, (5) **flag convention** — bf16-specific changes ship behind a
 `SGLANG_OPT_BF16_<MODULE/KERNEL>` env flag (e.g. `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE`,
 `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED`, `SGLANG_OPT_BF16_MOE_GEMM1_FOLD`); dtype-agnostic
-changes keep the `SGLANG_OPT_LORA_*` namespace (e.g. F1-①
+changes keep the `SGLANG_OPT_LORA_*` namespace (e.g. opt5
 `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE`). All default-on like the existing family — A/B
 baselines must set `=0` explicitly.
 
-### F0 — two-stream-at-prefill A/B (flag-only) — ✗ DONE 2026-06-11, NEGATIVE
+### opt4 (was opt4) — two-stream-at-prefill A/B (flag-only) — ✗ DONE 2026-06-11, NEGATIVE
 Prefill is always serial today (`SGLANG_TWO_STREAM_MAX_TOKENS` defaults 256 < 4096-tok chunks),
 so the whole LoRA-Δ chain (~345 µs/layer incl. re-sort) sits on the main stream. Raising the
-gate to 8192 (zero-code A/B, `optF0/`) was measured: **prefill −8~9% at all of bs16/32/64**
+gate to 8192 (zero-code A/B, `opt4/`) was measured: **prefill −8~9% at all of bs16/32/64**
 (two column: 91.4/91.3/92.5% ON/OFF), decode flat, noise floor (single column, identical
 cells) ±0–2%. Two-streaming the 4096-token chunks adds side-stream sync overhead + SM
 contention that exceeds the overlap benefit. **Verdict: keep the 256 default; no change.**
 Informative loss: the prefill bottleneck is NOT serialization — work must be *removed*
-(kernels + launches), not rearranged. F1's priority is strengthened. Results: `optF0/`.
+(kernels + launches), not rearranged. opt5's priority is strengthened. Results: `opt4/`.
 
-### F1 — routing-metadata + shared-buffer reuse at prefill (cheap, do first)
+### opt5 (✅ done) + opt6 (next) — routing-metadata + shared-buffer reuse at prefill
 **Scope upgraded 2026-06-11** (shared-bf16-activation insight, §1 last bullet): not just reuse
 the trtllm routing *metadata* — reuse the base path's bf16 *data buffers* too. Prefill-only
 (decode keeps the current two-stream structure; see §1 caveat). Three pieces:
-1. **Kill the Triton re-sort ×4** by reusing trtllm routing metadata (or extending opt1's
-   fused align/scatter to the large-batch path): **−119 µs/layer (~46 ms/prefill), −8
-   launches/layer** — the launch cut also attacks the ~50% host-bound prefill wall.
+1. ✅ **opt5 DONE 2026-06-11** — implemented as a 1-line unify of the A (shrink) stage's
+   routing BLOCK_SIZE_M with the B stage's at prefill (≥512 tokens), making the per-layer
+   `routing_cache` key match across stages. Commit
+   [`850faa87f`](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce)
+   (pushed to PR #4 branch). **Result: prefill +7.4~8.2% (single) / +9.4~11.1% (two-stream)
+   @bs16/32/64, decode flat, e2e −0.2~2%; align/sort 4×→2×/layer (−50% kernel time, −2688
+   launches); acc KL at the vLLM noise floor.** The remaining 2×/layer are genuinely
+   different sorts (shared-outer A routes by lora id, per-expert B by expert id) — collapsing
+   them needs the trtllm-metadata integration (opt7's pipeline). Honest cost: shrink kernel
+   +1.9 ms/window from the tile change (32→64), far outweighed. Results: `opt5/`.
    Flag: `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE` (common namespace — dtype-agnostic).
 2. **gate_up LoRA shrink reads `permuted_hidden_bf16`** (the base permute output) instead of
    re-gathering raw hidden via its own sorted ids: contiguous expert-grouped reads, and the Δ
    comes out in permuted order (simplifies the activation/epilogue indexing).
-   Flag: `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` (bf16-only; bundle into F3's pipeline).
+   Flag: `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` (bf16-only; bundle into opt7's pipeline).
 3. **down LoRA shrink reads `activated_bf16`** directly; the activation kernel stops writing
    the redundant `activation_lora_input` side-capture: **−50 MB/layer HBM write at prefill**
    (≈half the activation kernel's write traffic; 33 → ~20 µs expected) + one buffer freed.
@@ -174,13 +181,13 @@ Pieces 1–2 are LoRA Python/Triton-layer; an order of magnitude simpler than th
 three are bf16-unique sharing wins except 1, which is dtype-agnostic (fp8/nvfp4 prefill runs
 the same native-align fallback — fixing it benefits the FP8 deliverable too).
 
-### F2 — bf16 unfused-cubin probe (decides fold route a vs b)
+### opt7-step0 (was opt7-step0) — bf16 unfused-cubin probe (decides fold route a vs b)
 Write the bf16 analogue of `sgl_trtllm_fp4_probe_unfused` (launcher.cu ~L4047):
 Bfloat16/Bfloat16 + Swiglu + `unfuseActForLora=true`, check `getValidConfigIndices()`.
 `>0` ⇒ route (a) (trtllm-gen cubin exists, just wire it); `-1` ⇒ route (b) below.
 Build/run on GB300; expected `-1` (same wall NVFP4 hit).
 
-### F3 — the in-MoE fold (the big one; bf16-only, additive)
+### opt7 (was opt7) — the in-MoE fold (the big one; bf16-only, additive)
 Flags: `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy).
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
@@ -198,7 +205,7 @@ Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - Risks: hand-rolled CUTLASS grouped GEMM must approach the tuned `bmm_Bfloat16` cubin
   (57 µs target); gemm1 weights need a CUTLASS-friendly layout re-prep at load (BlockMajorK
   is trtllm-gen-specific); routing-metadata (`cta_idx_xy_to_batch_idx`, dynamic per-expert
-  counts) integration into CUTLASS Grouped GEMM (shared with F1 piece 2 — same pipeline).
+  counts) integration into CUTLASS Grouped GEMM (shared with opt5 piece 2 — same pipeline).
 - **De-risking strategy: prefill-only fold + dual-layout gemm1 weights (added 2026-06-11).**
   Keep BOTH weight layouts at load: trtllm shuffled+BlockMajorK (decode keeps the tuned bmm
   cubin — zero regression risk, it's launch-bound and already good) and a CUTLASS layout
