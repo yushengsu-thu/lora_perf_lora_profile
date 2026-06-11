@@ -36,6 +36,22 @@ current state, plus the planned next steps.
   GEMM itself** (the in-MoE fold, §5).
 - Two-stream is **default-on for decode** (`SGLANG_TWO_STREAM_MAX_TOKENS=256`, installed
   whenever `SGLANG_EXPERIMENTAL_LORA_OPTI=1`); prefill (2048 > 256) is always serial.
+- **Shared bf16 activations (bf16-unique advantage, 2026-06-11).** In fp8/nvfp4, base GEMMs
+  consume *quantized* inputs while LoRA GEMMs consume *bf16* — every activation exists twice
+  (quantized + bf16 capture). In the bf16 path the two are the **same tensor**, but the code
+  doesn't yet exploit it:
+  - the base path's `permuted_hidden_bf16` (expert-grouped, padded — exactly grouped-GEMM
+    layout) is directly readable by the gate_up LoRA shrink (fp8 never materializes it;
+    nvfp4 materializes it as fp4 — unusable for LoRA);
+  - the base path's `activated_bf16` holds the same values as the `activation_lora_input`
+    side-capture the activation kernel writes for the down-proj LoRA shrink — fp8/fp4 *must*
+    write that bf16 copy (their activated output is quantized); for bf16 it's pure redundancy
+    (~50 MB/layer extra HBM write at prefill, ≈half the activation kernel's write traffic);
+  - and it is the reason the EVT fold (F3) is feasible at all: bf16 accum + bf16 Δ → SwiGLU
+    → bf16 out needs no per-expert/per-token scale bookkeeping in the epilogue.
+  **Caveat:** sharing adds a dependency on the main-stream permute/activation — at decode this
+  would serialize what two-stream currently overlaps. Apply the sharing on the **prefill path
+  only** (gate by token count); decode keeps the current side-stream structure.
 
 ## 2. Optimizations done
 
@@ -118,11 +134,34 @@ Key findings:
 
 ## 5. Future work (priority order)
 
-### F1 — routing-metadata reuse at prefill (cheap, do first)
-Eliminate the Triton chain's 4×/layer re-sort by reusing the trtllm routing metadata (or by
-extending the opt1 fused align/scatter to the large-batch path). Targets **−119 µs/layer
-kernel time (~46 ms/prefill) and −8 launches/layer** — likely an order of magnitude simpler
-than the fold, isolated to the LoRA Python/Triton layer.
+### F0 — two-stream-at-prefill A/B (flag-only, half a day, do immediately)
+Prefill is always serial today (`SGLANG_TWO_STREAM_MAX_TOKENS` defaults 256 < 4096-tok chunks),
+so the whole LoRA-Δ chain (~345 µs/layer incl. re-sort) sits on the main stream, never hidden
+behind the fat main-path GEMMs (~330 µs/layer). Raising the gate to ≥4096 is a **zero-code,
+dtype-agnostic** experiment: A/B via `bench_profile_matrix.sh` (0/256 vs 8192). Upside if the
+Δ chain fully hides: prefill MoE −30~40 %. Risks (why it must be measured, not assumed):
+side-stream SM contention at large batch, and ~50 % of prefill is host-bound — overlap can't
+fix the host. Either outcome is informative: a win is free; a loss confirms the bottleneck is
+host/kernel rather than serialization and strengthens F1's priority. Prefill-win criterion
+applies: must clear noise (>~10 %) in BOTH single and two-stream columns.
+
+### F1 — routing-metadata + shared-buffer reuse at prefill (cheap, do first)
+**Scope upgraded 2026-06-11** (shared-bf16-activation insight, §1 last bullet): not just reuse
+the trtllm routing *metadata* — reuse the base path's bf16 *data buffers* too. Prefill-only
+(decode keeps the current two-stream structure; see §1 caveat). Three pieces:
+1. **Kill the Triton re-sort ×4** by reusing trtllm routing metadata (or extending opt1's
+   fused align/scatter to the large-batch path): **−119 µs/layer (~46 ms/prefill), −8
+   launches/layer** — the launch cut also attacks the ~50% host-bound prefill wall.
+2. **gate_up LoRA shrink reads `permuted_hidden_bf16`** (the base permute output) instead of
+   re-gathering raw hidden via its own sorted ids: contiguous expert-grouped reads, and the Δ
+   comes out in permuted order (simplifies the activation/epilogue indexing).
+3. **down LoRA shrink reads `activated_bf16`** directly; the activation kernel stops writing
+   the redundant `activation_lora_input` side-capture: **−50 MB/layer HBM write at prefill**
+   (≈half the activation kernel's write traffic; 33 → ~20 µs expected) + one buffer freed.
+   (Small bf16-launcher-internal .cu change; FP8/NVFP4 untouched — they *need* the capture.)
+Pieces 1–2 are LoRA Python/Triton-layer; an order of magnitude simpler than the fold. All
+three are bf16-unique sharing wins except 1, which is dtype-agnostic (fp8/nvfp4 prefill runs
+the same native-align fallback — fixing it benefits the FP8 deliverable too).
 
 ### F2 — bf16 unfused-cubin probe (decides fold route a vs b)
 Write the bf16 analogue of `sgl_trtllm_fp4_probe_unfused` (launcher.cu ~L4047):
@@ -147,7 +186,19 @@ Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - Risks: hand-rolled CUTLASS grouped GEMM must approach the tuned `bmm_Bfloat16` cubin
   (57 µs target); gemm1 weights need a CUTLASS-friendly layout re-prep at load (BlockMajorK
   is trtllm-gen-specific); routing-metadata (`cta_idx_xy_to_batch_idx`, dynamic per-expert
-  counts) integration into CUTLASS Grouped GEMM.
+  counts) integration into CUTLASS Grouped GEMM (shared with F1 piece 2 — same pipeline).
+- **De-risking strategy: prefill-only fold + dual-layout gemm1 weights (added 2026-06-11).**
+  Keep BOTH weight layouts at load: trtllm shuffled+BlockMajorK (decode keeps the tuned bmm
+  cubin — zero regression risk, it's launch-bound and already good) and a CUTLASS layout
+  (prefill fold), dispatched by token count. Cost: gemm1 duplicate ≈ **+9.7 GB/rank**
+  (48 layers × 32 local experts × 1536×2048 × 2 B) — affordable on GB300 288 GB (model is
+  only ~15.3 GB/rank). This is a trade **only bf16 can afford 1:1** (an unquantized layout
+  copy of an fp4 model would be 4× its base weights). CUTLASS then only has to win at
+  prefill sizes — where the permute+activation+round-trip savings dominate and the tuned
+  cubin's edge is smallest. Failure mode is safe: if CUTLASS doesn't win at prefill, don't
+  switch; decode is never touched.
+- Enabler: the shared-bf16-activation property (§1) — the EVT epilogue needs no quant scale
+  bookkeeping, which is exactly what makes this fold bf16-only feasible.
 - Isolation: new bf16-only kernel + `Bf16LoraLauncher` changes only — FP8/NVFP4 untouched.
 
 **Diagram** (current path vs fold, with measured per-layer costs):
