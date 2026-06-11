@@ -110,7 +110,7 @@ must set the flag `=0` explicitly (unset = ON = non-measurement).
 
 | # | what | flag | invasiveness | targets |
 |---|---|---|---|---|
-| **F0** | two-stream-at-prefill A/B (`SGLANG_TWO_STREAM_MAX_TOKENS` 256→≥4096) | existing env (common) | **zero code** (flag A/B, half a day) | hide the serial ~345 µs/layer LoRA-Δ chain behind main GEMMs; either outcome informative |
+| **F0** | two-stream-at-prefill A/B (`SGLANG_TWO_STREAM_MAX_TOKENS` 256→8192) | existing env (common) | **zero code** (flag A/B) | ✗ **DONE 2026-06-11, NEGATIVE — prefill −8~9% @bs16/32/64 (noise floor ±2%), decode flat; keep 256.** Confirms prefill bottleneck ≠ serialization → remove work (F1), don't rearrange it. See `optF0/` |
 | **F1-①** | routing-metadata reuse at prefill (kill Triton re-sort ×4) | `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE` (common) | Python/Triton (`virtual_experts.py`, opt1's direct extension) | −119 µs/layer, −8 launches/layer; dtype-agnostic — helps the FP8 deliverable |
 | **F1-②** | gate_up LoRA shrink reads `permuted_hidden_bf16` (prefill) | `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` | Triton index logic (bf16-gated) | contiguous expert-grouped reads; Δ in permuted order; bundled into F3's metadata pipeline |
 | **F1-③** | drop redundant `activation_lora_input` side-write (prefill) | `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE` | tiny `Bf16LoraLauncher`-internal .cu (FP8/NVFP4 *need* the capture — untouched) | −50 MB/layer HBM write; activation 33→~20 µs expected |
