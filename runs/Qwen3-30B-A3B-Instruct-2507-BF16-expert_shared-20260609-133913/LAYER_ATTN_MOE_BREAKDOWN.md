@@ -31,9 +31,9 @@ real benefit is **wall-clock**: decode +17% (2125→2481 tok/s ≈ −23 µs/lay
 | LoRA shrink A (q/k/v/o part) | 0 | ~4.2 | +4.2 | ~0 | fuse q/k/v shrink into one GEMM + cuBLAS | |
 | LoRA expand B (o part) | 0 | ~5.0 | +5.0 | ~0 | cuBLAS; fuse fp32→bf16 cast into expand | |
 
-*(No further attention-LoRA work planned in the F0–F3 ladder: the cuBLAS/fuse opts above are
+*(No further attention-LoRA work planned in the opt4–opt7 ladder: the cuBLAS/fuse opts above are
 already enabled and the remaining ROI is low — prefill attn-LoRA is ~103 µs/layer vs the MoE
-side's ~330 µs of removable cost. Revisit only after F3.)*
+side's ~330 µs of removable cost. Revisit only after opt7.)*
 
 ## ② MoE sublayer:  base ~50 µs → LoRA ~96 µs  (+46 µs)
 
@@ -42,8 +42,8 @@ side's ~330 µs of removable cost. Revisit only after F3.)*
 | MoE core (bmm expert GEMM / router / finalize) | 36.3 | 34.2 | ~0 | 0 | — | | |
 | gate GEMM (nvjet) + allreduce (after MoE) | ~14 | ~14 | ~0 | 0 | — | | |
 | routing (`routingCustom`) — **not LoRA-added** | 5.1 | 4.4 | −0.6 | 0 | — | | |
-| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (bf16 = **NVFP4 sibling**, decomposed + missing-unfused-cubin wall → **NOT a port of FP8**; bf16-only CUTLASS grouped GEMM: **gather-prologue + SwiGLU·LoRA EVT epilogue**, no quant to fuse into) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific) — ✅ opt1<br>• **fused_moe +7.2** (LoRA-Δ B-expand GEMM producing gate_upΔ — **NOT fold-absorbed**; the fold consumes a precomputed Δ, same as FP8/FP4's `gateUpLoraDeltaPtr`)<br>• **elem / copy / cast +3.9** (upcast / copy) — ✅ opt2<br>• **activation +3.2** (`moe::dev::activation`) — fold (F3); prefill side-write killed first by **F1-③** (`SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`) — ✅ opt2<br>• **permute +2.4** (`moe::dev::permute`) — fold (F3 gather-prologue, `SGLANG_OPT_BF16_MOE_GEMM1_FOLD`; **180 µs/layer at prefill**, see prefill view) | 1. [opt1 — align/sort fusion: decode +11% bs16](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea)<br>2. [opt2 — topk/pack: decode +5.6% bs16](https://github.com/yushengsu-thu/lora_perf_lora_profile/tree/main/runs/Qwen3-30B-A3B-Instruct-2507-BF16-expert_shared-20260609-133913/opt2) _(flag-only, no code commit)_<br>3. [opt3 — drop elem/upcast + lean `_get_lora_info`: no clear win](https://github.com/yushengsu-thu/sglang/commit/1536c6e4e65515f5ee7403c48b0726d55307d430)<br>4. **planned: F0–F3** (see future-work ladder below) |
-| LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | **NOT a fold target** (FP8/FP4 keep it separate) — two-stream overlap / cuBLAS; planned: **F1-②** prefill reads `permuted_hidden_bf16` (`SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED`, bundled into F3's pipeline) | | |
+| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | in-MoE LoRA fold (bf16 = **NVFP4 sibling**, decomposed + missing-unfused-cubin wall → **NOT a port of FP8**; bf16-only CUTLASS grouped GEMM: **gather-prologue + SwiGLU·LoRA EVT epilogue**, no quant to fuse into) + fuse routing/align/topk/elem | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific) — ✅ opt1<br>• **fused_moe +7.2** (LoRA-Δ B-expand GEMM producing gate_upΔ — **NOT fold-absorbed**; the fold consumes a precomputed Δ, same as FP8/FP4's `gateUpLoraDeltaPtr`)<br>• **elem / copy / cast +3.9** (upcast / copy) — ✅ opt2<br>• **activation +3.2** (`moe::dev::activation`) — fold (opt7); prefill side-write killed first by **opt6** (`SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE`)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`) — ✅ opt2<br>• **permute +2.4** (`moe::dev::permute`) — fold (opt7 gather-prologue, `SGLANG_OPT_BF16_MOE_GEMM1_FOLD`; **180 µs/layer at prefill**, see prefill view) | 1. [opt1 — align/sort fusion: decode +11% bs16](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea)<br>2. [opt2 — topk/pack: decode +5.6% bs16](https://github.com/yushengsu-thu/lora_perf_lora_profile/tree/main/runs/Qwen3-30B-A3B-Instruct-2507-BF16-expert_shared-20260609-133913/opt2) _(flag-only, no code commit)_<br>3. [opt3 — drop elem/upcast + lean `_get_lora_info`: no clear win](https://github.com/yushengsu-thu/sglang/commit/1536c6e4e65515f5ee7403c48b0726d55307d430)<br>4. [opt4 — two-stream prefill A/B: NEGATIVE, keep 256](opt4/) _(flag-only, no code commit)_<br>5. [opt5 — prefill routing reuse: prefill +8~11%, align/sort 4×→2×](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce)<br>6. **planned: opt6–opt7** (see future-work ladder below) |
+| LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | **NOT a fold target** (FP8/FP4 keep it separate) — two-stream overlap / cuBLAS; planned: **opt7-②** prefill reads `permuted_hidden_bf16` (`SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED`, bundled into opt7's pipeline) | | |
 | LoRA shrink A (shared_expert part) | 0 | ~7.4 | +7.4 | ~0 | cuBLAS / fuse | | |
 | LoRA MoE expand (routed experts) | 0 | 3.4 | +3.4 | ~0 | **NOT a fold target** (FP8/FP4 keep it separate) — two-stream overlap / cuBLAS | | |
 
@@ -72,10 +72,10 @@ vs LoRA decomposed ≈ 695 µs (5×)**, prefill tok/s = 19% of no-LoRA.
 
 | item (µs/layer prefill) | cost | addressed by |
 |---|---|---|
-| standalone `permute` | **180** (largest single item; 3× GEMM1 itself) | fold **gather-prologue** (F3) |
-| standalone `activation` | 33 | fold EVT epilogue (F3); **F1-③** first kills its redundant `activation_lora_input` side-write (−50 MB/layer ≈ half its write traffic, 33 → ~20 µs expected) |
-| Triton re-sort ×4 (`moe_align`+`count_and_sort`) | **119** (routing already computed by trtllm-gen; decode has opt1's fused path, prefill falls back) | **F1-① routing-metadata reuse — cheap, do first** (dtype-agnostic: fp8/nvfp4 prefill runs the same fallback) |
-| LoRA-Δ GEMMs (shrink/fused_moe/expand) | 226 | stays; **F1-②** feeds the shrink from the base path's `permuted_hidden_bf16` (contiguous expert-grouped reads instead of its own gather) + two-stream overlap |
+| standalone `permute` | **180** (largest single item; 3× GEMM1 itself) | fold **gather-prologue** (opt7) |
+| standalone `activation` | 33 | fold EVT epilogue (opt7); **opt6** first kills its redundant `activation_lora_input` side-write (−50 MB/layer ≈ half its write traffic, 33 → ~20 µs expected) |
+| Triton re-sort ×4 (`moe_align`+`count_and_sort`) | **119** (routing already computed by trtllm-gen; decode has opt1's fused path, prefill falls back) | ✅ **opt5 DONE 2026-06-11: prefill +7.4~8.2% (single) / +9.4~11.1% (two) @bs16/32/64, decode flat; align/sort 4×→2×/layer (−50%), −2688 launches.** Remaining 2×/layer = genuinely different sorts (shared-outer A vs per-expert B) — collapsing them = opt7's metadata pipeline. [commit 850faa87f](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) · [opt5/](opt5/) |
+| LoRA-Δ GEMMs (shrink/fused_moe/expand) | 226 | stays; **opt7-②** feeds the shrink from the base path's `permuted_hidden_bf16` (contiguous expert-grouped reads instead of its own gather) + two-stream overlap |
 | attention-LoRA GEMMs (qkv_b 39 + sgemm_a 34 + sgemm_b 30) | ~103 | — (separate bucket; cuBLAS opts already on, low remaining ROI) |
 | expert GEMMs + routing + finalize | ~137 | — (parity target for CUTLASS) |
 
@@ -89,18 +89,18 @@ In fp8/nvfp4, base GEMMs consume *quantized* inputs while LoRA GEMMs consume *bf
 activation exists twice (quantized + bf16 capture). In the bf16 path they are the **same
 tensor**, verified in code but not yet exploited:
 - `permuted_hidden_bf16` (expert-grouped, padded — already grouped-GEMM layout) is directly
-  readable by the gate_up LoRA shrink (**F1-②**). fp8 never materializes it; nvfp4 materializes
+  readable by the gate_up LoRA shrink (**opt7-②**). fp8 never materializes it; nvfp4 materializes
   it as fp4 — unusable for LoRA.
 - `activated_bf16` is **bitwise the same values** as the `activation_lora_input` side-capture
   (dev-kernel writes the same packed value to both; the fp8 variant divides by `scaleOut`,
-  which is *why* fp8/fp4 must keep the capture) → bf16 can drop it (**F1-③**).
+  which is *why* fp8/fp4 must keep the capture) → bf16 can drop it (**opt6**).
 - No scale bookkeeping in a bf16 epilogue — this property is what makes the CUTLASS-EVT fold
-  (F3) feasible for bf16 only.
+  (opt7) feasible for bf16 only.
 - **Caveat:** sharing adds a dependency on main-stream permute/activation — at decode it would
   serialize what two-stream overlaps. Apply on the **prefill path only** (gate by token count).
 
 ## Future-work ladder (full detail in [`journal_opti.md`](journal_opti.md) §5)
-Execution order: **F0 (½ day) → F1-① (+③ piggybacked) → F2 (½ day) → F3.**
+Execution order: **opt4 ✗done → opt5 ✅done → opt6 → opt7-step0 (½ day) → opt7.**
 Selection criteria: (1) prefer dtype-common fp8/nvfp4/bf16, (2) low code invasiveness,
 (3) high ROI, (4) every step validated with the prefill/decode/e2e triplet + single×two
 matrix, (5) **flag convention**: bf16-specific changes ship behind a
@@ -110,12 +110,12 @@ must set the flag `=0` explicitly (unset = ON = non-measurement).
 
 | # | what | flag | invasiveness | targets |
 |---|---|---|---|---|
-| **F0** | two-stream-at-prefill A/B (`SGLANG_TWO_STREAM_MAX_TOKENS` 256→8192) | existing env (common) | **zero code** (flag A/B) | ✗ **DONE 2026-06-11, NEGATIVE — prefill −8~9% @bs16/32/64 (noise floor ±2%), decode flat; keep 256.** Confirms prefill bottleneck ≠ serialization → remove work (F1), don't rearrange it. See `optF0/` |
-| **F1-①** | routing-metadata reuse at prefill (kill Triton re-sort ×4) | `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE` (common) | Python/Triton (`virtual_experts.py`, opt1's direct extension) | −119 µs/layer, −8 launches/layer; dtype-agnostic — helps the FP8 deliverable |
-| **F1-②** | gate_up LoRA shrink reads `permuted_hidden_bf16` (prefill) | `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` | Triton index logic (bf16-gated) | contiguous expert-grouped reads; Δ in permuted order; bundled into F3's metadata pipeline |
-| **F1-③** | drop redundant `activation_lora_input` side-write (prefill) | `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE` | tiny `Bf16LoraLauncher`-internal .cu (FP8/NVFP4 *need* the capture — untouched) | −50 MB/layer HBM write; activation 33→~20 µs expected |
-| **F2** | bf16 unfused-cubin probe (analogue of `sgl_trtllm_fp4_probe_unfused`, launcher.cu:4047) | — (diagnostic) | diagnostic only | decides fold route (a) wiring vs (b) CUTLASS |
-| **F3** | in-MoE fold: CUTLASS grouped GEMM, gather-prologue + SwiGLU·LoRA EVT epilogue | `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy) | high (new bf16-only kernel) | permute 180 + activation 33 µs/layer + gate_up HBM round-trip; **de-risk: prefill-only + dual-layout gemm1 weights (+9.7 GB/rank, affordable on GB300 288 GB — decode keeps the tuned cubin, zero regression)** |
+| **opt4** | two-stream-at-prefill A/B (`SGLANG_TWO_STREAM_MAX_TOKENS` 256→8192) | existing env (common) | **zero code** (flag A/B) | ✗ **DONE 2026-06-11, NEGATIVE — prefill −8~9% @bs16/32/64 (noise floor ±2%), decode flat; keep 256.** Confirms prefill bottleneck ≠ serialization → remove work (opt5), don't rearrange it. See `opt4/` |
+| **opt5** | routing reuse at prefill (unify A/B stage routing block → cache hits) | `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE` (common) | Python/Triton, +1 line ([850faa87f](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce)) | ✅ **DONE 2026-06-11: prefill +8~11% both columns, decode flat, align/sort 4×→2× (−50%); acc at noise floor.** Dtype-agnostic — helps the FP8 deliverable. See `opt5/` |
+| **opt7-②** | gate_up LoRA shrink reads `permuted_hidden_bf16` (prefill) | `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` | Triton index logic (bf16-gated) | contiguous expert-grouped reads; Δ in permuted order; bundled into opt7's metadata pipeline |
+| **opt6** | drop redundant `activation_lora_input` side-write (prefill) | `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE` | tiny `Bf16LoraLauncher`-internal .cu (FP8/NVFP4 *need* the capture — untouched) | −50 MB/layer HBM write; activation 33→~20 µs expected |
+| **opt7-step0** | bf16 unfused-cubin probe (analogue of `sgl_trtllm_fp4_probe_unfused`, launcher.cu:4047) | — (diagnostic) | diagnostic only | decides fold route (a) wiring vs (b) CUTLASS |
+| **opt7** | in-MoE fold: CUTLASS grouped GEMM, gather-prologue + SwiGLU·LoRA EVT epilogue | `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy) | high (new bf16-only kernel) | permute 180 + activation 33 µs/layer + gate_up HBM round-trip; **de-risk: prefill-only + dual-layout gemm1 weights (+9.7 GB/rank, affordable on GB300 288 GB — decode keeps the tuned cubin, zero regression)** |
 
 ## Recommended order (decode, bs16)
 1. **in-MoE LoRA fold** — biggest structural win. Corrected accounting (2026-06-11): the fold-only
@@ -130,9 +130,9 @@ must set the flag `=0` explicitly (unset = ON = non-measurement).
    quant**, so the equivalent is **one bf16-only CUTLASS grouped GEMM: gather-prologue (= fused
    permute, the original V1 epilogue-only framing misses the prefill-dominant permute) + SwiGLU·LoRA
    EVT epilogue** — kills standalone `permute` + `activation` + the `gate_up` HBM round-trip
-   (ref §5/§6 + journal F3). De-risked by **prefill-only dispatch + dual-layout gemm1 weights**
-   (see the future-work ladder). Do **F0** (flag-only two-stream-prefill A/B), **F1**
-   (routing-metadata + shared-buffer reuse) and the **F2 unfused-cubin probe** first —
+   (ref §5/§6 + journal opt7). De-risked by **prefill-only dispatch + dual-layout gemm1 weights**
+   (see the future-work ladder). Do **opt4** (two-stream-prefill A/B, done), **opt5/opt6**
+   (routing-metadata + shared-buffer reuse) and the **opt7-step0 unfused-cubin probe** first —
    see the ladder above and `journal_opti.md` §5.
 2. **align/sort/scatter fusion** (~10 µs) — largest (a) item; fixed-cost at small batch → decode benefits
    disproportionately. ✅ **DONE — [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea): decode +11.0/9.9/8.8% (bs16/32/64), e2e −9%, prefill flat; `moe_align_block_size_small_batch` 384→0 launches.** See `opt1/`.
