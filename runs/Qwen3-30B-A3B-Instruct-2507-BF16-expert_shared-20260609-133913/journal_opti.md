@@ -198,8 +198,14 @@ unfused MajorK = −1, [3] Identity = −1 — at every tile (8–128) and both 
 [0] fused sanity = 144/64/4 configs. Route (a) is dead; opt7 = route (b) CUTLASS grouped
 GEMM. Probe commit `d12fe74a7`; results `opt7_step0/PROBE.md`.**
 
-### opt7 (was opt7) — the in-MoE fold (the big one; bf16-only, additive)
+### opt7 — the in-MoE fold (IN PROGRESS: design + P0 done 2026-06-12, see opt7_design/)
 Flags: `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy).
+**Progress**: `opt7_design/OPT7_DESIGN.md` (phases P0–P4; exact fold semantics incl. the
+interleaved-GEMM-cols vs half-contiguous-Δ trap; P1 has a hard 57 µs parity gate vs the tuned
+bmm cubin). **P0 done** (sglang `1a82c2111`+`7cea5ed86`): CUTLASS 4.5 include path wired into
+the JIT module (probe [4,5,1]); naive reference fold kernel pins the semantics — unit test vs
+torch fp32 reference PASS (max rel err 3.8e-3, `dev/test_bf16_fold_ref.py`). Next: P1 CUTLASS
+grouped GEMM (plain epilogue, pre-permuted A) → parity gate → P2 EVT fold → P3 gather.
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
   (= fused permute — **scope upgrade from the original V1 epilogue-only framing**, justified
