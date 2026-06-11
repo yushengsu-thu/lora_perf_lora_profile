@@ -204,8 +204,17 @@ Flags: `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for
 interleaved-GEMM-cols vs half-contiguous-Δ trap; P1 has a hard 57 µs parity gate vs the tuned
 bmm cubin). **P0 done** (sglang `1a82c2111`+`7cea5ed86`): CUTLASS 4.5 include path wired into
 the JIT module (probe [4,5,1]); naive reference fold kernel pins the semantics — unit test vs
-torch fp32 reference PASS (max rel err 3.8e-3, `dev/test_bf16_fold_ref.py`). Next: P1 CUTLASS
-grouped GEMM (plain epilogue, pre-permuted A) → parity gate → P2 EVT fold → P3 gather.
+torch fp32 reference PASS (max rel err 3.8e-3, `dev/test_bf16_fold_ref.py`). **P1 done 2026-06-12 — PARITY GATE PASS**: CUTLASS Sm100 ptr-array grouped GEMM
+(2SM UMMA, 256×128×64 cluster tile, device-built group args, sglang `7e1e69eb6`).
+At the CORRECT per-rank shapes (EP4: 8192 expanded rows/rank, E=32, N=1536, K=2048):
+**65.6 µs end-to-end (~52 µs pure kernel) vs the 57 µs tuned cubin (gate ≤68.4) — PASS**;
+cuBLAS bmm = 44.8 µs shows ~20% further tuning headroom. NOTE the first gate run "MISSED"
+at 172 µs because the bench forgot the EP4 divide (32768 rows = 4× real work; 57 µs at that
+size would be 3.6 PF/s = 3× cuBLAS, impossible). Debug ladder that got it working: global
+`Tensor` name clash (TU split from tvm-ffi), explicit PtrArray schedules (Auto picks the
+non-array mainloop), ArchTag Sm100 (builder rejects Sm103 for dense ptr-array),
+hw_info.sm_count (persistent scheduler needs it or run() = kErrorInternal pre-launch).
+Next: P2 EVT fold epilogue (SwiGLU+Δ, half-width store) → P3 gather prologue → P4 integrate.
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
   (= fused permute — **scope upgrade from the original V1 epilogue-only framing**, justified
