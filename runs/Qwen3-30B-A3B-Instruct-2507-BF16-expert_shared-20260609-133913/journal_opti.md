@@ -172,10 +172,17 @@ the trtllm routing *metadata* — reuse the base path's bf16 *data buffers* too.
    re-gathering raw hidden via its own sorted ids: contiguous expert-grouped reads, and the Δ
    comes out in permuted order (simplifies the activation/epilogue indexing).
    Flag: `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` (bf16-only; bundle into opt7's pipeline).
-3. **down LoRA shrink reads `activated_bf16`** directly; the activation kernel stops writing
-   the redundant `activation_lora_input` side-capture: **−50 MB/layer HBM write at prefill**
-   (≈half the activation kernel's write traffic; 33 → ~20 µs expected) + one buffer freed.
-   (Small bf16-launcher-internal .cu change; FP8/NVFP4 untouched — they *need* the capture.)
+3. ✗ **opt6 DONE 2026-06-11 — NO CLEAR WIN.** Implemented (commits `cf9d0e55e` mechanism,
+   `f4971ea4e` default-off): down shrink reads `activated_bf16` via an exported
+   expanded→permuted row map; the activation kernel skips the side-capture. **Mechanism
+   verified**: activation 32.9→21.7 µs/call (−34%, matching the half-write-traffic
+   prediction), map-read shrink ≈0 extra cost, acc KL 0.003530 at the vLLM noise floor.
+   **But the bench is flat** (prefill 97.3~101.6% both columns, decode flat): the ~5 ms/
+   prefill saving is below the ±2% noise floor and the map D2D export adds one launch on
+   the host-bound prefill path. Honest math correction: the saving was always <1% — the
+   earlier "+2~4%" hope was wrong. **Flag default False** (off = byte-identical); the
+   permuted-read + row-map plumbing is exactly what the opt7 fold pipeline needs and is
+   now proven at the noise floor. Results: `opt6/` (profiles in-pod only — flaky uplink).
    Flag: `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE` (bf16-only).
 Pieces 1–2 are LoRA Python/Triton-layer; an order of magnitude simpler than the fold. All
 three are bf16-unique sharing wins except 1, which is dtype-agnostic (fp8/nvfp4 prefill runs
