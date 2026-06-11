@@ -134,6 +134,15 @@ Key findings:
 
 ## 5. Future work (priority order)
 
+Selection criteria (user directive 2026-06-11): (1) prefer dtype-common fp8/nvfp4/bf16,
+(2) low code invasiveness, (3) high ROI, (4) validate every step with the prefill/decode/e2e
+triplet + single×two matrix, (5) **flag convention** — bf16-specific changes ship behind a
+`SGLANG_OPT_BF16_<MODULE/KERNEL>` env flag (e.g. `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE`,
+`SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED`, `SGLANG_OPT_BF16_MOE_GEMM1_FOLD`); dtype-agnostic
+changes keep the `SGLANG_OPT_LORA_*` namespace (e.g. F1-①
+`SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE`). All default-on like the existing family — A/B
+baselines must set `=0` explicitly.
+
 ### F0 — two-stream-at-prefill A/B (flag-only, half a day, do immediately)
 Prefill is always serial today (`SGLANG_TWO_STREAM_MAX_TOKENS` defaults 256 < 4096-tok chunks),
 so the whole LoRA-Δ chain (~345 µs/layer incl. re-sort) sits on the main stream, never hidden
@@ -152,13 +161,16 @@ the trtllm routing *metadata* — reuse the base path's bf16 *data buffers* too.
 1. **Kill the Triton re-sort ×4** by reusing trtllm routing metadata (or extending opt1's
    fused align/scatter to the large-batch path): **−119 µs/layer (~46 ms/prefill), −8
    launches/layer** — the launch cut also attacks the ~50% host-bound prefill wall.
+   Flag: `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE` (common namespace — dtype-agnostic).
 2. **gate_up LoRA shrink reads `permuted_hidden_bf16`** (the base permute output) instead of
    re-gathering raw hidden via its own sorted ids: contiguous expert-grouped reads, and the Δ
    comes out in permuted order (simplifies the activation/epilogue indexing).
+   Flag: `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` (bf16-only; bundle into F3's pipeline).
 3. **down LoRA shrink reads `activated_bf16`** directly; the activation kernel stops writing
    the redundant `activation_lora_input` side-capture: **−50 MB/layer HBM write at prefill**
    (≈half the activation kernel's write traffic; 33 → ~20 µs expected) + one buffer freed.
    (Small bf16-launcher-internal .cu change; FP8/NVFP4 untouched — they *need* the capture.)
+   Flag: `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE` (bf16-only).
 Pieces 1–2 are LoRA Python/Triton-layer; an order of magnitude simpler than the fold. All
 three are bf16-unique sharing wins except 1, which is dtype-agnostic (fp8/nvfp4 prefill runs
 the same native-align fallback — fixing it benefits the FP8 deliverable too).
@@ -170,6 +182,7 @@ Bfloat16/Bfloat16 + Swiglu + `unfuseActForLora=true`, check `getValidConfigIndic
 Build/run on GB300; expected `-1` (same wall NVFP4 hit).
 
 ### F3 — the in-MoE fold (the big one; bf16-only, additive)
+Flags: `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy).
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
   (= fused permute — **scope upgrade from the original V1 epilogue-only framing**, justified
