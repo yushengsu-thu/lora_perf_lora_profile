@@ -214,7 +214,16 @@ size would be 3.6 PF/s = 3× cuBLAS, impossible). Debug ladder that got it worki
 `Tensor` name clash (TU split from tvm-ffi), explicit PtrArray schedules (Auto picks the
 non-array mainloop), ArchTag Sm100 (builder rejects Sm103 for dense ptr-array),
 hw_info.sm_count (persistent scheduler needs it or run() = kErrorInternal pre-launch).
-Next: P2 EVT fold epilogue (SwiGLU+Δ, half-width store) → P3 gather prologue → P4 integrate.
+**P2 step1 done (`aec7c2fc1`)**: standard EVT is elementwise-only — the 2:1 interleaved
+column fold needs a forked epilogue collective. Fork base:
+`sm100_epilogue_array_nosmem.hpp` (TMEM→reg→direct gmem; pairs are intra-thread). Cost
+calibration: NoSmem full-width epilogue 84.4 µs vs TMA 65.6 µs (+19 µs) — the folded
+version stores HALF the bytes and replaces the 33 µs activation kernel + ~6 µs gate_up
+round-trip, so net fold value stays ~+20 µs/layer even before tuning. P1-parity config
+kept on the TMA epilogue meanwhile.
+Next: P2 step2 — `bf16_fold_epilogue.hpp` fork (pair-fold + Δ aux + silu, D[R,768]),
+validate vs the P0 ref kernel, perf vs (P1 GEMM + activation) total; then P3 gather
+prologue (cpasync mainloop — TMA cannot gather), P4 integrate.
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
   (= fused permute — **scope upgrade from the original V1 epilogue-only framing**, justified
