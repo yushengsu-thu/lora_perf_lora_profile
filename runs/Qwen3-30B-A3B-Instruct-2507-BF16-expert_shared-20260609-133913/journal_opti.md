@@ -188,11 +188,15 @@ Pieces 1–2 are LoRA Python/Triton-layer; an order of magnitude simpler than th
 three are bf16-unique sharing wins except 1, which is dtype-agnostic (fp8/nvfp4 prefill runs
 the same native-align fallback — fixing it benefits the FP8 deliverable too).
 
-### opt7-step0 (was opt7-step0) — bf16 unfused-cubin probe (decides fold route a vs b)
+### opt7-step0 (✅ done 2026-06-11) — bf16 unfused-cubin probe: route (b) CONFIRMED
 Write the bf16 analogue of `sgl_trtllm_fp4_probe_unfused` (launcher.cu ~L4047):
 Bfloat16/Bfloat16 + Swiglu + `unfuseActForLora=true`, check `getValidConfigIndices()`.
 `>0` ⇒ route (a) (trtllm-gen cubin exists, just wire it); `-1` ⇒ route (b) below.
 Build/run on GB300; expected `-1` (same wall NVFP4 hit).
+**Result (GB300, H=2048/I=768/topk8/32 local experts): [1] unfused BlockMajorK = −1, [2]
+unfused MajorK = −1, [3] Identity = −1 — at every tile (8–128) and both 16/4096 tokens;
+[0] fused sanity = 144/64/4 configs. Route (a) is dead; opt7 = route (b) CUTLASS grouped
+GEMM. Probe commit `d12fe74a7`; results `opt7_step0/PROBE.md`.**
 
 ### opt7 (was opt7) — the in-MoE fold (the big one; bf16-only, additive)
 Flags: `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy).
