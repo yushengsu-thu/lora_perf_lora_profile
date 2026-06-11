@@ -100,7 +100,7 @@ tensor**, verified in code but not yet exploited:
   serialize what two-stream overlaps. Apply on the **prefill path only** (gate by token count).
 
 ## Future-work ladder (full detail in [`journal_opti.md`](journal_opti.md) §5)
-Execution order: **opt4 ✗done → opt5 ✅done → opt6 ✗done (no win, infra kept) → opt7-step0 → opt7.**
+Execution order: **opt4 ✗done → opt5 ✅done → opt6 ✗done (no win, infra kept) → opt7-step0 ✅done (route b) → opt7 (next).**
 Selection criteria: (1) prefer dtype-common fp8/nvfp4/bf16, (2) low code invasiveness,
 (3) high ROI, (4) every step validated with the prefill/decode/e2e triplet + single×two
 matrix, (5) **flag convention**: bf16-specific changes ship behind a
@@ -114,7 +114,7 @@ must set the flag `=0` explicitly (unset = ON = non-measurement).
 | **opt5** | routing reuse at prefill (unify A/B stage routing block → cache hits) | `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE` (common) | Python/Triton, +1 line ([850faa87f](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce)) | ✅ **DONE 2026-06-11: prefill +8~11% both columns, decode flat, align/sort 4×→2× (−50%); acc at noise floor.** Dtype-agnostic — helps the FP8 deliverable. See `opt5/` |
 | **opt7-②** | gate_up LoRA shrink reads `permuted_hidden_bf16` (prefill) | `SGLANG_OPT_BF16_MOE_SHRINK_PERMUTED` | Triton index logic (bf16-gated) | contiguous expert-grouped reads; Δ in permuted order; bundled into opt7's metadata pipeline |
 | **opt6** | drop redundant `activation_lora_input` side-write (prefill) | `SGLANG_OPT_BF16_MOE_ACT_DROP_LORA_CAPTURE` (**default OFF**) | bf16-launcher .cu + optional params (FP8/NVFP4 untouched) | ✗ **DONE 2026-06-11, NO CLEAR WIN — prefill 97.3~101.6% (noise), decode flat.** Mechanism verified: activation 32.9→21.7 µs/call (−34%), map-read shrink ≈0 cost, acc at noise floor — but ~5 ms/prefill is sub-noise and the map D2D adds a launch. **Kept default-off as the opt7 pipeline stepping stone.** [cf9d0e55e](https://github.com/yushengsu-thu/sglang/commit/cf9d0e55e)+[f4971ea4e](https://github.com/yushengsu-thu/sglang/commit/f4971ea4e) · `opt6/` |
-| **opt7-step0** | bf16 unfused-cubin probe (analogue of `sgl_trtllm_fp4_probe_unfused`, launcher.cu:4047) | — (diagnostic) | diagnostic only | decides fold route (a) wiring vs (b) CUTLASS |
+| **opt7-step0** | bf16 unfused-cubin probe | — (diagnostic, [d12fe74a7](https://github.com/yushengsu-thu/sglang/commit/d12fe74a7)) | diagnostic only | ✅ **DONE 2026-06-11: route (b) CONFIRMED** — unfused Swiglu GEMM1 cubin = −1 at every tile, in BlockMajorK AND MajorK; Identity variant also absent; fused sanity passes (144 configs). Same wall as NVFP4. See `opt7_step0/PROBE.md` |
 | **opt7** | in-MoE fold: CUTLASS grouped GEMM, gather-prologue + SwiGLU·LoRA EVT epilogue | `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy) | high (new bf16-only kernel) | permute 180 + activation 33 µs/layer + gate_up HBM round-trip; **de-risk: prefill-only + dual-layout gemm1 weights (+9.7 GB/rank, affordable on GB300 288 GB — decode keeps the tuned cubin, zero regression)** |
 
 ## Recommended order (decode, bs16)
