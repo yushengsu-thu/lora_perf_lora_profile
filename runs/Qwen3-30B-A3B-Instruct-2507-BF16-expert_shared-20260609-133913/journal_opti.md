@@ -143,16 +143,15 @@ changes keep the `SGLANG_OPT_LORA_*` namespace (e.g. F1-①
 `SGLANG_OPT_LORA_PREFILL_ROUTING_REUSE`). All default-on like the existing family — A/B
 baselines must set `=0` explicitly.
 
-### F0 — two-stream-at-prefill A/B (flag-only, half a day, do immediately)
+### F0 — two-stream-at-prefill A/B (flag-only) — ✗ DONE 2026-06-11, NEGATIVE
 Prefill is always serial today (`SGLANG_TWO_STREAM_MAX_TOKENS` defaults 256 < 4096-tok chunks),
-so the whole LoRA-Δ chain (~345 µs/layer incl. re-sort) sits on the main stream, never hidden
-behind the fat main-path GEMMs (~330 µs/layer). Raising the gate to ≥4096 is a **zero-code,
-dtype-agnostic** experiment: A/B via `bench_profile_matrix.sh` (0/256 vs 8192). Upside if the
-Δ chain fully hides: prefill MoE −30~40 %. Risks (why it must be measured, not assumed):
-side-stream SM contention at large batch, and ~50 % of prefill is host-bound — overlap can't
-fix the host. Either outcome is informative: a win is free; a loss confirms the bottleneck is
-host/kernel rather than serialization and strengthens F1's priority. Prefill-win criterion
-applies: must clear noise (>~10 %) in BOTH single and two-stream columns.
+so the whole LoRA-Δ chain (~345 µs/layer incl. re-sort) sits on the main stream. Raising the
+gate to 8192 (zero-code A/B, `optF0/`) was measured: **prefill −8~9% at all of bs16/32/64**
+(two column: 91.4/91.3/92.5% ON/OFF), decode flat, noise floor (single column, identical
+cells) ±0–2%. Two-streaming the 4096-token chunks adds side-stream sync overhead + SM
+contention that exceeds the overlap benefit. **Verdict: keep the 256 default; no change.**
+Informative loss: the prefill bottleneck is NOT serialization — work must be *removed*
+(kernels + launches), not rearranged. F1's priority is strengthened. Results: `optF0/`.
 
 ### F1 — routing-metadata + shared-buffer reuse at prefill (cheap, do first)
 **Scope upgraded 2026-06-11** (shared-bf16-activation insight, §1 last bullet): not just reuse
