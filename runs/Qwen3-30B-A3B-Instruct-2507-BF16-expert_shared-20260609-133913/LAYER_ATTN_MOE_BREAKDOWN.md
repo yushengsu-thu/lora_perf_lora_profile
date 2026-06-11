@@ -68,16 +68,40 @@ vs LoRA decomposed ≈ 695 µs (5×)**, prefill tok/s = 19% of no-LoRA.
 
 | item (µs/layer prefill) | cost | addressed by |
 |---|---|---|
-| standalone `permute` | **180** (largest single item; 3× GEMM1 itself) | fold **gather-prologue** |
-| standalone `activation` | 33 | fold EVT epilogue |
-| Triton re-sort ×4 (`moe_align`+`count_and_sort`) | **119** (routing already computed by trtllm-gen; decode has opt1's fused path, prefill falls back) | **F1 routing-metadata reuse — cheap, do first** |
-| LoRA-Δ GEMMs (shrink/fused_moe/expand) | 226 | stays (overlap targets) |
+| standalone `permute` | **180** (largest single item; 3× GEMM1 itself) | fold **gather-prologue** (F3) |
+| standalone `activation` | 33 | fold EVT epilogue (F3); **F1-③** first kills its redundant `activation_lora_input` side-write (−50 MB/layer ≈ half its write traffic, 33 → ~20 µs expected) |
+| Triton re-sort ×4 (`moe_align`+`count_and_sort`) | **119** (routing already computed by trtllm-gen; decode has opt1's fused path, prefill falls back) | **F1-① routing-metadata reuse — cheap, do first** (dtype-agnostic: fp8/nvfp4 prefill runs the same fallback) |
+| LoRA-Δ GEMMs (shrink/fused_moe/expand) | 226 | stays; **F1-②** feeds the shrink from the base path's `permuted_hidden_bf16` (contiguous expert-grouped reads instead of its own gather) + two-stream overlap |
+| attention-LoRA GEMMs (qkv_b 39 + sgemm_a 34 + sgemm_b 30) | ~103 | — (separate bucket; cuBLAS opts already on, low remaining ROI) |
 | expert GEMMs + routing + finalize | ~137 | — (parity target for CUTLASS) |
 
 Plus: prefill is **~half host-bound** (917 ms real wall vs ~340 ms compute kernels; 15.9k launches
 vs base 8.1k, eager+serial) — launch-count reductions compound beyond the kernel-µs accounting.
 Fold + routing-reuse projected: **695 → ~363 µs/layer MoE kernel time (−48%)**. Diagram:
 [`in_moe_fold_before_after.png`](in_moe_fold_before_after.png).
+
+## Shared bf16 activations — the bf16-unique reuse angle (2026-06-11)
+In fp8/nvfp4, base GEMMs consume *quantized* inputs while LoRA GEMMs consume *bf16* — every
+activation exists twice (quantized + bf16 capture). In the bf16 path they are the **same
+tensor**, verified in code but not yet exploited:
+- `permuted_hidden_bf16` (expert-grouped, padded — already grouped-GEMM layout) is directly
+  readable by the gate_up LoRA shrink (**F1-②**). fp8 never materializes it; nvfp4 materializes
+  it as fp4 — unusable for LoRA.
+- `activated_bf16` is **bitwise the same values** as the `activation_lora_input` side-capture
+  (dev-kernel writes the same packed value to both; the fp8 variant divides by `scaleOut`,
+  which is *why* fp8/fp4 must keep the capture) → bf16 can drop it (**F1-③**).
+- No scale bookkeeping in a bf16 epilogue — this property is what makes the CUTLASS-EVT fold
+  (F3) feasible for bf16 only.
+- **Caveat:** sharing adds a dependency on main-stream permute/activation — at decode it would
+  serialize what two-stream overlaps. Apply on the **prefill path only** (gate by token count).
+
+## Future-work ladder (full detail in [`journal_opti.md`](journal_opti.md) §5)
+| # | what | invasiveness | targets |
+|---|---|---|---|
+| **F0** | two-stream-at-prefill A/B (`SGLANG_TWO_STREAM_MAX_TOKENS` 256→≥4096) | **zero code** (flag A/B, half a day) | hide the serial ~345 µs/layer LoRA-Δ chain behind main GEMMs; either outcome informative |
+| **F1** | routing-metadata (①) + shared-buffer (②③) reuse at prefill | Python/Triton + tiny bf16-launcher .cu | −119 µs re-sort, −50 MB/layer write, −8 launches/layer; ① is dtype-agnostic (helps FP8 deliverable) |
+| **F2** | bf16 unfused-cubin probe (analogue of `sgl_trtllm_fp4_probe_unfused`, launcher.cu:4047) | diagnostic only | decides fold route (a) wiring vs (b) CUTLASS |
+| **F3** | in-MoE fold: CUTLASS grouped GEMM, gather-prologue + SwiGLU·LoRA EVT epilogue | high (new bf16-only kernel) | permute 180 + activation 33 µs/layer + gate_up HBM round-trip; **de-risk: prefill-only + dual-layout gemm1 weights (+9.7 GB/rank, affordable on GB300 288 GB — decode keeps the tuned cubin, zero regression)** |
 
 ## Recommended order (decode, bs16)
 1. **in-MoE LoRA fold** — biggest structural win. Corrected accounting (2026-06-11): the fold-only
@@ -92,8 +116,10 @@ Fold + routing-reuse projected: **695 → ~363 µs/layer MoE kernel time (−48%
    quant**, so the equivalent is **one bf16-only CUTLASS grouped GEMM: gather-prologue (= fused
    permute, the original V1 epilogue-only framing misses the prefill-dominant permute) + SwiGLU·LoRA
    EVT epilogue** — kills standalone `permute` + `activation` + the `gate_up` HBM round-trip
-   (ref §5/§6 + journal F3). Do **F1 routing-metadata reuse** (prefill re-sort ×4, ~119 µs/layer)
-   and the **F2 unfused-cubin probe** first — see `journal_opti.md` §5.
+   (ref §5/§6 + journal F3). De-risked by **prefill-only dispatch + dual-layout gemm1 weights**
+   (see the future-work ladder). Do **F0** (flag-only two-stream-prefill A/B), **F1**
+   (routing-metadata + shared-buffer reuse) and the **F2 unfused-cubin probe** first —
+   see the ladder above and `journal_opti.md` §5.
 2. **align/sort/scatter fusion** (~10 µs) — largest (a) item; fixed-cost at small batch → decode benefits
    disproportionately. ✅ **DONE — [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea): decode +11.0/9.9/8.8% (bs16/32/64), e2e −9%, prefill flat; `moe_align_block_size_small_batch` 384→0 launches.** See `opt1/`.
 3. **topk+pack single launch** (~3 µs) + **drop elem/upcast / `_get_lora_info`** (~4 µs) — PR #27329 /
