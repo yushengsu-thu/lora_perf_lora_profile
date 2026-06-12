@@ -1,83 +1,106 @@
-# Per-decode-layer breakdown — no-lora vs LoRA(single) vs two-stream (Attn / MoE sublayers)
+# Per-layer breakdown — no-lora vs LoRA (Attn / MoE sublayers) — REBUILT 2026-06-12
 
-Qwen3-30B-A3B-Instruct-2507-BF16-expert_shared, GB300, TP4/EP4, bs16, **cuda-graph ON, decode**,
-commit `526e0ae22`. One transformer layer inside an NVTX `step[DECODE bs=16]` (48 layers/step), GPU
-main-stream (`tid 128`), packed by GPU-active time. Kernels attributed by name (position-assisted);
-`shrink A` / `expand B` straddle q/k/v/o (attn) and shared_expert (MoE) and are split by position.
+Qwen3-30B-A3B-Instruct-2507-BF16-expert_shared, GB300, TP4/EP4, branch = **opt1+2+5**
+(`850faa87f`), run [`20260612-051818`]: graph-on **decode bs64** (by-stage DECODE trace, TP0,
+two-stream default-on) + graph-on **prefill** (bs64 EXTEND chunks, TP0). All numbers below are
+from THIS round's traces — no carried-over figures. The pre-restructure (bs16, `526e0ae22`)
+table is preserved in git history.
 
-**Per layer: no-lora ~96 µs → LoRA-single ~158 µs (+63 µs, 1.65×).** Base compute (fmha, dense GEMM,
-expert GEMM, allreduce) is ~unchanged by LoRA; the delta is the LoRA-added rows.
+**Decode bs64, per layer: base step-wall 29.8 µs → LoRA 42.0 µs (+41%); GPU-active 15.9 → 44.4 µs.**
+(bench ITL: 5.46 → 7.90 ms/step; decode tok/s ratio 69.1%.)
+**Prefill (4096-tok chunk), per layer-forward: base wall 525 µs → LoRA 4558 µs (8.7×; tok/s ratio 20.9%).**
 
-`two-stream Δ` = GPU-active time removed from the critical (main) stream by two-stream. **It is ~0 for
-every group**: two-stream *overlaps* work (concurrent side stream), it does **not** reduce GPU-active
-time — on this BF16 path only ~3% of LoRA moves to side streams (11 ms of ~360 ms, whole-trace). Its
-real benefit is **wall-clock**: decode +17% (2125→2481 tok/s ≈ −23 µs/layer) via latency hiding.
+## ① Attention sublayer (decode bs64, µs/layer GPU-active)
 
-`url` = the optimization commit/PR that addresses this row (only landed, e2e-proven items).
+| group | base | LoRA | Δ | optimization | url |
+|---|---|---|---|---|---|
+| attention fmha | * | 2.81 | ~ | — | |
+| dense GEMM nvjet (qkv/o/gate) | * | 4.49 | ~ | — | |
+| qknorm/rope | * | 0.71 | ~ | — | |
+| LoRA qkv_b expand | 0 | 0.79 | +0.79 | cuBLAS expand | ✅ enabled (PR#4 baseline: `SGLANG_OPT_LORA_CUBLAS`, `SGLANG_OPT_LORA_QKV_B_STORE`) |
+| LoRA shrink A (attn+shared, both sublayers) | 0 | 0.99 | +0.99 | fused qkv shrink + cuBLAS | ✅ enabled (PR#4 baseline) |
+| LoRA expand B (o+shared, both sublayers) | 0 | 1.14 | +1.14 | cuBLAS + fused cast | ✅ enabled (PR#4 baseline) |
 
-> **Updated 2026-06-12**: opt6/opt7 were moved off the working branch into standalone PRs
-> ([#7](https://github.com/yushengsu-thu/sglang/pull/7), [#8](https://github.com/yushengsu-thu/sglang/pull/8));
-> the branch (and PR#4) is back to the opt1+2+5 state. This table keeps **measurements and landed
-> optimizations only** — no planned/forecast entries. The decode table is decode-only and
-> under-weights prefill-dominant items (permute); see the prefill view below.
+\* base-cell attention groups are inside the replayed CUDA graph and partially mis-bucket by
+name (e.g. base "rmsnorm" 6.38 vs lora 0.14 is a naming-split artifact — merged elem+norm is
+base 8.11 vs lora 8.05 ≈ flat). Base per-group decode numbers are therefore not split here;
+the trustworthy decode comparators are the step-wall (29.8 vs 42.0 µs/layer) and the
+LoRA-added rows (which run outside the base graph).
 
-## ① Attention sublayer:  base ~42 µs → LoRA ~55 µs  (+13 µs)
+## ② MoE sublayer (decode bs64, µs/layer GPU-active)
 
-| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization | url |
-|---|---|---|---|---|---|---|
-| attention fmha | 10.4 | 10.4 | ~0 | 0 | — | |
-| dense GEMM nvjet (qkv/o) | ~24 | ~24 | ~0 | 0 | — | |
-| allreduce (after attn) | ~8 | ~8 | ~0 | 0 | — | |
-| LoRA qkv_b expand | 0 | 4.2 | +4.2 | ~0 | cuBLAS expand | ✅ enabled (PR#4 baseline: `SGLANG_OPT_LORA_CUBLAS`, `SGLANG_OPT_LORA_QKV_B_STORE`, default-on) |
-| LoRA shrink A (q/k/v/o part) | 0 | ~4.2 | +4.2 | ~0 | fuse q/k/v shrink into one GEMM + cuBLAS | ✅ enabled (PR#4 baseline: fused qkv shrink + `SGLANG_OPT_LORA_CUBLAS`) |
-| LoRA expand B (o part) | 0 | ~5.0 | +5.0 | ~0 | cuBLAS; fuse fp32→bf16 cast into expand | ✅ enabled (PR#4 baseline: `SGLANG_OPT_LORA_CUBLAS` + fused cast) |
+| group | base | LoRA | Δ | optimization | url |
+|---|---|---|---|---|---|
+| expert GEMM (bmm cubin; base = fused MoE runner) | * | 6.39 | ~ | — | |
+| routing | * | 0.77 | ~ | — | |
+| finalize | * | 0.53 | ~ | — | |
+| align/sort (Triton) | 0 | 2.50 | +2.50 | align/sort fusion + routing reuse | ✅ [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea) · ✅ [opt5](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) |
+| topk/pack | 0 | 0.71 | +0.71 | fused topk+pack | ✅ opt2 (flag-only) |
+| LoRA MoE shrink (routed) | 0 | 1.97 | +1.97 | | |
+| fused_moe (LoRA-Δ B-expand) | 0 | 1.44 | +1.44 | | |
+| LoRA MoE expand (routed) | 0 | 0.64 | +0.64 | | |
+| permute (standalone) | 0 | 0.87 | +0.87 | | |
+| activation (standalone) | 0 | 0.44 | +0.44 | | |
+| allreduce/comm | 6.91 | 9.18 | +2.28 | — (sync-point cost; see host view) | |
+| elem/copy/norm (merged, see *) | 8.11 | 8.05 | −0.06 | — | |
 
-*(Remaining attention-LoRA ROI is low: prefill attn-LoRA is ~103 µs/layer vs the MoE side's much
-larger removable cost.)*
+## Prefill view (µs/layer-forward, 4096-tok chunk, graph-on bs64 TP0 — production path)
 
-## ② MoE sublayer:  base ~50 µs → LoRA ~96 µs  (+46 µs)
+| group | base | LoRA | Δ | addressed by |
+|---|---|---|---|---|
+| **allreduce/comm** | 256 | **3654** | **+3398** | **host-side skew** (see host view) — **opt8 target** |
+| permute (standalone) | 0 | 176 | +176 | (kernel asset on [PR#8](https://github.com/yushengsu-thu/sglang/pull/8), default-OFF, host-bound-blocked) |
+| fused_moe (LoRA-Δ B-expand) | 0 | 100 | +100 | |
+| LoRA MoE shrink | 0 | 58 | +58 | |
+| align/sort (Triton re-sort) | 0 | 57 | +57 | ✅ opt5 took it 4×→2×/layer (was ~119) |
+| LoRA qkv_b expand | 0 | 38 | +38 | |
+| LoRA MoE expand | 0 | 36 | +36 | |
+| LoRA shrink A | 0 | 33 | +33 | |
+| activation (standalone) | 0 | 31 | +31 | (PR#8 fold asset, same condition) |
+| LoRA expand B | 0 | 30 | +30 | |
+| topk/pack | 0 | 11 | +11 | ✅ opt2 |
+| expert GEMM (bmm) | 94 | 109 | +15 | — |
+| base compute (fmha/nvjet/norm/finalize/routing) | 124 | 116 | −8 | — |
+| **wall total** | **525** | **4558** | **+4033** | |
 
-| group (µs/layer) | base | LoRA | Δ | two-stream Δ | optimization | MoE-decomp extra — components (µs/layer) | url |
-|---|---|---|---|---|---|---|---|
-| MoE core (bmm expert GEMM / router / finalize) | 36.3 | 34.2 | ~0 | 0 | — | | |
-| gate GEMM (nvjet) + allreduce (after MoE) | ~14 | ~14 | ~0 | 0 | — | | |
-| routing (`routingCustom`) — **not LoRA-added** | 5.1 | 4.4 | −0.6 | 0 | — | | |
-| **MoE-decomp extra** | 0 | **26.0** | **+26.0** | ~0 | align/sort fusion (opt1) + topk/pack + elem (opt2) | • **align/sort/scatter +10.2** (`moe_align_block_size_small_batch` 6.7 + `moe_lora_merged::fused_align_scatter` 3.5, latter LoRA-specific) — ✅ opt1<br>• **fused_moe +7.2** (LoRA-Δ B-expand GEMM producing gate_upΔ)<br>• **elem / copy / cast +3.9** (upcast / copy) — ✅ opt2<br>• **activation +3.2** (`moe::dev::activation`, standalone activation kernel)<br>• **topk / pack +3.0** (`_fused_virtual_topk_ids`) — ✅ opt2<br>• **permute +2.4** (`moe::dev::permute`, standalone row permute; **180 µs/layer at prefill**, see prefill view) | 1. ✅ [opt1 — align/sort fusion: decode +11%](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea) · [results](opt1/)<br>2. ✅ [opt2 — topk/pack: decode +5.6%](opt2/) _(flag-only, no code commit)_<br>5. ✅ [opt5 — prefill routing reuse: prefill +8~11%, align/sort 4×→2×](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) · [results](opt5/)<br>— history (no e2e win): see ledger below |
-| LoRA MoE shrink (routed experts) | 0 | 9.2 | +9.2 | ~0 | | | |
-| LoRA shrink A (shared_expert part) | 0 | ~7.4 | +7.4 | ~0 | | | |
-| LoRA MoE expand (routed experts) | 0 | 3.4 | +3.4 | ~0 | | | |
+LoRA compute extras sum to ~+570 µs/layer; **allreduce spin is +3398 µs/layer = 83% of the
+lora prefill wall**. The host-bound cost manifests as comm spin (every sync point waits for
+the slowest rank's CPU dispatch), not as visible idle.
 
-(~+6 µs/layer of elementwise/reshape from the decomposed path is split across both sublayers. The
-"MoE-decomp extra" components sum to ~+29 µs incl. routing≈0; the headline +26 µs excludes the LoRA
-shrink/expand GEMM rows.)
+## Host view (this round)
 
-## Where the +63 µs/layer goes
-- **MoE sublayer ≈ +46 µs (73%)** — MoE-decomp extra (~+26 µs, biggest item **align/sort +10.2 µs**,
-  larger than any single LoRA GEMM) + MoE LoRA shrink/expand (+13 µs) + shared_expert shrink (~+7 µs).
-- **Attention sublayer ≈ +13 µs (21%)** — the q/k/v/o LoRA GEMMs.
-- elementwise ≈ +6 µs. The decomp cluster is ~46% of the per-layer LoRA overhead.
+| metric | base | LoRA | source |
+|---|---|---|---|
+| prefill launches / 4096-tok chunk | 837 | 1532 | graph-on EXTEND window |
+| prefill launches / layer-forward | 17.4 | 31.9 | ″ |
+| prefill: graph-off wall vs GPU-busy | idle 53%, 8.1k launches | **idle 49%, 13.1k launches → HOST-BOUND** | `sanity_check_opt`, graph-off bs16 |
+| prefill allreduce µs/call (graph-on) | 149 | **1672 (11×)** | rank-skew spin at every sync point |
+| decode launches / step (graph-on) | 29 (graph replay) | **304** (replay + eager two-stream side work) | by-stage DECODE trace |
+| eager compute share of prefill wall | — | ~9% (327 ms of 3588 ms; allreduce spin excluded) | graph-off |
 
-## Prefill view (this is where the decomposed-path cost dominates; full data in [`journal_opti.md`](journal_opti.md) §4)
-Per layer-forward, 4096-token chunk (`current_base_lora` bs16-TP0 trace): **base fused MoE ≈ 140 µs
-vs LoRA decomposed ≈ 695 µs (5×)**, prefill tok/s = 19% of no-LoRA.
+## Expected-gain rule (sanity_check_opt only — no hand-estimates)
 
-| item (µs/layer prefill) | cost | addressed by |
-|---|---|---|
-| standalone `permute` | **180** (largest single item; 3× GEMM1 itself; decode-shaped launch grid, 11% occupancy) | |
-| standalone `activation` | 33 | |
-| Triton re-sort ×4 (`moe_align`+`count_and_sort`) | **119** (routing already computed by trtllm-gen; decode has opt1's fused path, prefill falls back) | ✅ **opt5 DONE 2026-06-11: prefill +7.4~8.2% (single) / +9.4~11.1% (two) @bs16/32/64, decode flat; align/sort 4×→2×/layer (−50%), −2688 launches.** Remaining 2×/layer = genuinely different sorts (shared-outer A vs per-expert B). [commit 850faa87f](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) · [opt5/](opt5/) |
-| LoRA-Δ GEMMs (shrink/fused_moe/expand) | 226 | |
-| attention-LoRA GEMMs (qkv_b 39 + sgemm_a 34 + sgemm_b 30) | ~103 | (cuBLAS opts already on, low remaining ROI) |
-| expert GEMMs + routing + finalize | ~137 | — |
+- **Any GPU-side µs/layer removal at prefill: e2e ceiling 0.0%** (host-bound absorption;
+  tool verdict "DO NOT proceed on e2e grounds").
+- **opt8 (host-side)**: lora chunk wall 219.7 ms → compute+comm floor ≈ 60 ms ⇒ **prefill
+  tok/s ceiling ~3.6× (39k → ~140k; base 190k)**; e2e @bs16 ceiling ≈ +4% (prefill share
+  0.84 s / 13.56 s) — above the ±2% noise floor.
+- Kernel triage (config-vs-bandwidth): permute 14.5× theo / 11% occ (config-bound — PR#8 fold
+  covers it off-branch); count_and_sort 166× but ~16 ms/prefill = 0.4% of wall (sub-noise);
+  activation 3.6×. No on-branch GPU kernel clears the payoff rule.
 
-Plus: prefill is **~half host-bound** (917 ms real wall vs ~340 ms compute kernels; 15.9k launches
-vs base 8.1k, eager+serial) — launch-count reductions compound beyond the kernel-µs accounting.
+## Ladder (opt8 onward; selection: dtype-common first, flag conventions per F)
+
+| # | what | flag | dtype scope | status |
+|---|---|---|---|---|
+| **opt8** | piecewise CUDA graph for LoRA prefill — `server_args` condition 7 force-disables piecewise whenever `enable_lora`; runner already handles `lora_ids`, token ladder reaches 4096 | probe: `--enforce-piecewise-cuda-graph` (zero-code); productize as `SGLANG_OPT_LORA_*` if code needed | **common** (host/Python level; fp8/nvfp4 prefill is the same eager pipeline) | step0 probe queued (`dev/probe_opt8_piecewise.sh`) |
 
 ## Commit & code-size ledger (history, incl. no-e2e-win items)
 
 Working branch (`qwen3-30b-a3b-2507-bf16`, PR#4) carries **opt1+2+5 only** (base `526e0ae22` →
-`850faa87f`). Full pre-restructure history is archived at
+`850faa87f`). Full pre-restructure history archived at
 [`archive/qwen3-30b-a3b-2507-bf16-opt6-7-20260612`](https://github.com/yushengsu-thu/sglang/tree/archive/qwen3-30b-a3b-2507-bf16-opt6-7-20260612).
+Post-reset health: acc KL 0.003727 < floor 0.004243; bench = opt5 baseline within noise.
 
 | opt | where | lines | verdict |
 |---|---|---|---|
@@ -87,13 +110,15 @@ Working branch (`qwen3-30b-a3b-2507-bf16`, PR#4) carries **opt1+2+5 only** (base
 | **opt4** two-stream prefill | none (flag experiment) | **0** | ✗ **無 e2e 收益** (prefill −8%, NOT adopted) · [results](opt4/) |
 | **opt5** routing reuse | [`850faa87f`](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) | **+20** (2 files) | ✅ prefill +8~11% |
 | **opt6** act-capture drop | [**PR #7**](https://github.com/yushengsu-thu/sglang/pull/7) (off-branch) | +183/−34 (5 files) | ✗ **無 e2e 收益** (sub-noise; mechanism verified, default-OFF) · [results](opt6/) |
-| **opt7** in-MoE fold (probe+P0–P4) | [**PR #8**](https://github.com/yushengsu-thu/sglang/pull/8) (off-branch, stacked on #7) | +1,515/−34 (14 files) | ✗ **無 e2e 收益** (kernels −62% all-gates-PASS; e2e host-bound-absorbed, default-OFF) · [results](opt7/OPT7.md) |
+| **opt7** in-MoE fold (probe+P0–P4) | [**PR #8**](https://github.com/yushengsu-thu/sglang/pull/8) (off-branch, stacked on #7) | +1,515/−34 (14 files) | ✗ **無 e2e 收益** (kernels −62% all-gates-PASS; host-bound-absorbed, default-OFF) · [results](opt7/OPT7.md) |
 
 Notes: all SHIPPED perf (decode +11~12%, prefill +14~18% cumulative) comes from **34 lines**
 (opt1 + opt5); opt2/opt4 were zero-code. The opt7 CUTLASS fold asset is correctness-proven and
-flag-gated OFF on PR #8 — enable condition: prefill no longer host-bound. FP8/NVFP4 byte-identical
-throughout (the working branch now contains zero bf16-launcher-only kernel code).
+flag-gated OFF on PR #8 — enable condition: prefill no longer host-bound (= opt8's target).
+FP8/NVFP4 byte-identical throughout.
 
-bs16 is latency / fixed-cost bound — which is why these small routing/align/elem kernels matter at
-decode. allreduce excluded from GPU-active analysis (spin-wait inflated). Numbers are one steady
-decode layer.
+Method note: decode numbers are one steady `step[DECODE bs=64]` window (by-stage profile,
+`dev/profile_decode_bystage.sh` — `--profile-start-step` is an ABSOLUTE scheduler counter and
+cannot reach a decode window with the dev recipe); prefill numbers are 12 steady mid-run
+`step[EXTEND bs=2 toks=4096]` chunks. allreduce kept as its own row (spin-inflated at prefill —
+treated as a host symptom, not GPU work).

@@ -198,7 +198,7 @@ unfused MajorK = −1, [3] Identity = −1 — at every tile (8–128) and both 
 [0] fused sanity = 144/64/4 configs. Route (a) is dead; opt7 = route (b) CUTLASS grouped
 GEMM. Probe commit `d12fe74a7`; results `opt7_step0/PROBE.md`.**
 
-### opt7 — the in-MoE fold (IN PROGRESS: design + P0 done 2026-06-12, see opt7_design/)
+### opt7 — the in-MoE fold (✦ COMPLETE 2026-06-12: kernels all-gates-PASS, e2e host-bound; moved to PR #8)
 Flags: `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT` for the weight copy).
 **Progress**: `opt7_design/OPT7_DESIGN.md` (phases P0–P4; exact fold semantics incl. the
 interleaved-GEMM-cols vs half-contiguous-Δ trap; P1 has a hard 57 µs parity gate vs the tuned
@@ -284,7 +284,72 @@ Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 **Diagram** (current path vs fold, with measured per-layer costs):
 [`in_moe_fold_before_after.png`](in_moe_fold_before_after.png)
 
-## Commit & code-size ledger (sglang PR #4 branch, base `526e0ae22` → `dfa3493c9`)
+## 2026-06-12 — Post-restructure re-measurement (run `20260612-051818`) + opt8 direction
+
+**Re-measurement on the cleaned branch (opt1+2+5 @ `850faa87f`, warm pod):**
+- **acc**: KL(sglang-lora, trainer) = **0.003727 < floor 0.004243** — at the noise floor, branch healthy.
+- **bench triplet vs the opt5 baseline (on/two)**: prefill −1.3/−1.2/+0.5%, decode +0.1/+0.4/+0.1%,
+  e2e ±0.2% @bs16/32/64 — all within noise; per-cell serverlog_sanity OK (≤0.7% bench-vs-server).
+- **sanity_check_opt (graph-off lora bs16)**: PREFILL wall 3588 ms, GPU-busy 1825 ms, **idle 49%,
+  13,124 launches → HOST-BOUND**; of the "busy", **allreduce spin-wait is 1498 ms (82%)** — real
+  compute ≈ 327 ms ≈ **9% of wall**. Any GPU-side µs/layer removal: e2e ceiling **0.0%** (tool
+  verdict: DO NOT proceed on e2e grounds).
+- **Production attribution (graph-on bs64, one 4096-tok EXTEND chunk)**:
+  | cell | chunk wall | allreduce | compute kernels | true idle | launches |
+  |---|---|---|---|---|---|
+  | no-lora | 24.5 ms | 12.0 ms (149 µs/call) | 10.3 ms | 9% | 816 |
+  | lora | **219.7 ms** | **158.9 ms (1672 µs/call, 73% of wall)** | 40.0 ms | 9% | 1569 |
+  The 11×-per-call allreduce is **host-side rank skew amplified at every sync point** — the
+  host-bound cost of eager LoRA prefill manifests as comm spin, not as visible idle. Real extra
+  compute is only 4× (40 vs 10.3 ms; matches the 695 vs 140 µs/layer prefill view).
+- **Kernel triage**: permute 14.5× theoretical / 11% occupancy (config-bound — the PR#8 fold
+  covers it, off-branch), count_and_sort 165× but only ~16 ms/prefill (0.4% of wall, sub-noise),
+  activation 3.6×. **No GPU kernel is worth a project on this branch.**
+- (lora cell's `## Call CompiledFxGraph` = the small `@torch.compile` helper in
+  `virtual_experts.py:498`, 0.1 ms/chunk — noise, not piecewise.)
+
+**opt8 decision (host-side, per the host-bound rule):**
+- **Direction: let LoRA serving use the piecewise CUDA graph at prefill.** Root cause located:
+  `server_args._handle_piecewise_cuda_graph` condition 7 force-disables piecewise whenever
+  `enable_lora`/`lora_paths` is set — the no-lora cell is piecewise-eligible while every LoRA
+  config is locked to eager prefill. The infra is already there: the piecewise runner handles
+  `lora_ids` at capture, the default token ladder reaches 4096 (= our chunk size), and
+  `--enforce-piecewise-cuda-graph` skips the auto-disable (a **zero-code probe**).
+- **Ceiling (from this round's measurements only)**: collapsing the host skew takes the lora
+  chunk wall toward its compute+comm floor ≈ 60 ms vs measured 219.7 ms → **prefill tok/s
+  ceiling ~3.6× (39k → ~140k; no-lora = 190k)**. e2e @bs16 (prefill share 0.84 s / 13.56 s):
+  **e2e ceiling ≈ +4%** — above the ±2% noise floor. PASSES OPT-PAYOFF-RULE; prefill tok/s
+  (a first-class triplet metric, today 21% of base) is the headline target.
+- **dtype-common**: the gate removal is Python/host-level and all three dtypes share the eager
+  prefill pipeline → `SGLANG_OPT_LORA_*` namespace; fp8/nvfp4 benefit identically. No bf16-only
+  kernel code → compatibility hard-constraint satisfied by construction.
+- **Risks**: dynamo traceability of the `trtllm_lora_temp` custom ops in the bf16 path (the fp8
+  path already carries torch.compile-compatible wrappers in `sgl_fp8_moe.py`); adapter
+  load/switch invalidation; capture memory; two-stream×prefill interaction is nil (prefill is
+  serial ≥256 toks).
+- **Plan**: step0 = `--enforce-piecewise-cuda-graph` probe on the lora cell (boot / coherence /
+  acc) → if code is needed, an additive flag-gated relaxation of condition 7
+  (`SGLANG_OPT_LORA_PIECEWISE_PREFILL`) → full single×two matrix + acc + journal/breakdown sync.
+
+## 2026-06-12 — Branch restructure: opt6/opt7 moved off the working branch into standalone PRs
+
+The working branch `qwen3-30b-a3b-2507-bf16` was **reset to opt5 (`850faa87f`)** — it now carries
+exactly opt1+2+5 (the e2e-proven set); PR #4 auto-updated to that range. The opt6/opt7 work moved
+to two feature PRs targeting the working branch, each with the full measurement story and the
+"enable once prefill is host-unbound" condition in the description:
+
+- **[PR #7](https://github.com/yushengsu-thu/sglang/pull/7)** `opt6-act-capture-drop` (2 commits,
+  base = opt5) — act-capture drop, mechanism verified, sub-noise, default-OFF.
+- **[PR #8](https://github.com/yushengsu-thu/sglang/pull/8)** `opt6-7-in-moe-fold` (stacked on #7;
+  P4 depends on opt6's `activated_out`/`exp2perm` params) — the in-MoE fold, opt7's 24 commits
+  squashed by phase into probe/P0/P1/P2/P3/P4. **Tip tree verified byte-identical to the
+  pre-restructure tip `dfa3493c9`** (same git tree hash). Merge order: #7 → #8.
+
+Full pre-restructure history archived at `archive/qwen3-30b-a3b-2507-bf16-opt6-7-20260612`.
+Post-reset health check on GB300 (warm pod, code at `850faa87f`): acc KL at the noise floor +
+bench triplet vs the opt5 baseline — see `dev/results/.../20260612-*/`.
+
+## Commit & code-size ledger (working branch = opt1+2+5; opt6/7 on PRs #7/#8)
 
 | opt | commits | lines | verdict |
 |---|---|---|---|
@@ -293,10 +358,9 @@ Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 | **opt3** lean info | [`1536c6e4e`](https://github.com/yushengsu-thu/sglang/commit/1536c6e4e65515f5ee7403c48b0726d55307d430) | +30/−11 (2 files) | ✗ no win (kept, harmless) |
 | **opt4** two-stream prefill | none (flag experiment) | **0** | ✗ −8%, NOT adopted |
 | **opt5** routing reuse | [`850faa87f`](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) | **+20** (2 files) | ✅ prefill +8~11% |
-| **opt6** act-capture drop | [`cf9d0e55e`](https://github.com/yushengsu-thu/sglang/commit/cf9d0e55e) + [`f4971ea4e`](https://github.com/yushengsu-thu/sglang/commit/f4971ea4e) | +183/−34 (5 files) | ✗ sub-noise, default-OFF (plumbing feeds opt7) |
-| **opt7-step0** probe | [`d12fe74a7`](https://github.com/yushengsu-thu/sglang/commit/d12fe74a7) | +53 | route (b) confirmed |
-| **opt7** P0–P4 (22 commits) | P0 [`1a82c2111`](https://github.com/yushengsu-thu/sglang/commit/1a82c2111)(+176) · P1 [`f7a475b57`](https://github.com/yushengsu-thu/sglang/commit/f7a475b57)(+229, +8 fixups) · P2 [`15a224a18`](https://github.com/yushengsu-thu/sglang/commit/15a224a18)(+411) + vec [`f2247b5a8`](https://github.com/yushengsu-thu/sglang/commit/f2247b5a8)(+63/−16) · P3 [`f7e5d5119`](https://github.com/yushengsu-thu/sglang/commit/f7e5d5119)(+64) · P4 [`22feb0e73`](https://github.com/yushengsu-thu/sglang/commit/22feb0e73)(+43) + [`022d547e2`](https://github.com/yushengsu-thu/sglang/commit/022d547e2)(+142/−26) + 3 fixups | **net +1,462/−34** (13 files) | ✦ kernel −62% all-gates-PASS; e2e host-bound, default-OFF |
-| **TOTAL** | ~28 commits | **+1,506 / −50, 14 files** | |
+| **opt6** act-capture drop | [**PR #7**](https://github.com/yushengsu-thu/sglang/pull/7) (2 commits, off-branch; old SHAs on the archive branch) | +183/−34 (5 files) | ✗ 無 e2e 收益 — sub-noise, default-OFF (plumbing feeds opt7) |
+| **opt7** probe + P0–P4 | [**PR #8**](https://github.com/yushengsu-thu/sglang/pull/8) (stacked on #7; 24 commits squashed to probe/P0/P1/P2/P3/P4; tip tree == archived `dfa3493c9`) | **net +1,515/−34** (14 files) | ✗ 無 e2e 收益 — kernel −62% all-gates-PASS, host-bound-absorbed, default-OFF |
+| **working branch TOTAL** (opt1+2+5) | 4 commits over base | **+64 / −16** | |
 
 Notes: all SHIPPED perf (decode +11~12%, prefill +14~18% cumulative) comes from **34 lines**
 (opt1 + opt5); opt2/opt4 were zero-code. 97% of the lines (opt7) are the CUTLASS fold asset —
