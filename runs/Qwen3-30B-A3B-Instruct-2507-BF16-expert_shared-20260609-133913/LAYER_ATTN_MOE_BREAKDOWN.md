@@ -6,48 +6,45 @@ two-stream default-on) + graph-on **prefill** (bs64 EXTEND chunks, TP0). All num
 from THIS round's traces — no carried-over figures. The pre-restructure (bs16, `526e0ae22`)
 table is preserved in git history.
 
-**Decode bs64, per layer: base step-wall 29.8 µs → LoRA 42.0 µs (+41%); GPU-active 15.9 → 44.4 µs.**
-(bench ITL: 5.46 → 7.90 ms/step; decode tok/s ratio 69.1%.)
-**Decode numbers are with two-stream ON** (default, baked into the cuda-graph capture): the
-LoRA-Δ chain is already overlapped to the extent the mechanism allows (single→two decode
-+15~21% wall, historical matrices), and overlap removes ~0 GPU-active per row — so NO decode
-row below has further "hide it with two-stream instead of optimizing" headroom; the overlap
-is already in the baseline.
+**Decode bs64, per layer (CPU step-wall): base 30.8 µs → LoRA-single 42.1 → LoRA-two 42.6 µs;
+GPU-active (sum over streams): 130.9 → 180.5 → 195.0 µs.** Production wall = bench ITL:
+base 5.46 ms/step, lora-two 7.90 ms (ratio 69.1%); single ≈ 9.1 ms (historical matrices —
+single→two decode +15~21% wall).
+**Reading the single vs two columns**: two-stream costs **+14.5 µs/layer MORE GPU-active
+(+8%)** (side-stream bookkeeping: align/sort +3.4, elem/copy +4.9) yet wins wall via overlap
+— i.e. the overlap is already in the production baseline and removes no per-row GPU work, so
+no row below can be "hidden by two-stream instead of optimized". The big single→two per-row
+moves (shrink A 12.1→5.1) are work *relocation* to the side stream, not removal.
 **Prefill (4096-tok chunk), per layer-forward: base wall 525 µs → LoRA 4558 µs (8.7×; tok/s ratio 20.9%).**
 
-## ① Attention sublayer (decode bs64, µs/layer GPU-active)
+## ① Attention sublayer (decode bs64, µs/layer GPU-active; base / LoRA-single / LoRA-two)
 
-| group | base | LoRA | Δ | optimization | url |
+| group | base | LoRA single | LoRA two | optimization | url |
 |---|---|---|---|---|---|
-| attention fmha | * | 2.81 | ~ | — | |
-| dense GEMM nvjet (qkv/o/gate) | * | 4.49 | ~ | — | |
-| qknorm/rope | * | 0.71 | ~ | — | |
-| LoRA qkv_b expand | 0 | 0.79 | +0.79 | cuBLAS expand | ✅ enabled (PR#4 baseline: `SGLANG_OPT_LORA_CUBLAS`, `SGLANG_OPT_LORA_QKV_B_STORE`) |
-| LoRA shrink A (attn+shared, both sublayers) | 0 | 0.99 | +0.99 | fused qkv shrink + cuBLAS | ✅ enabled (PR#4 baseline) |
-| LoRA expand B (o+shared, both sublayers) | 0 | 1.14 | +1.14 | cuBLAS + fused cast | ✅ enabled (PR#4 baseline) |
+| attention fmha | 16.5 | 16.7 | 16.8 | — | |
+| dense GEMM nvjet (qkv/o + MoE gate) | 20.5 | 19.5 | 23.2 | — | |
+| qknorm/rope | 4.9 | 4.4 | 4.3 | — | |
+| LoRA qkv_b expand | 0 | 4.4 | 4.8 | cuBLAS expand | ✅ enabled (PR#4 baseline: `SGLANG_OPT_LORA_CUBLAS`, `SGLANG_OPT_LORA_QKV_B_STORE`) |
+| LoRA shrink A (attn+shared, both sublayers) | 0 | 12.1 | 5.1 | fused qkv shrink + cuBLAS; single→two = side-stream **relocation**, not removal | ✅ enabled (PR#4 baseline) |
+| LoRA expand B (o+shared, both sublayers) | 0 | 5.5 | 5.5 | cuBLAS + fused cast | ✅ enabled (PR#4 baseline) |
 
-\* base-cell attention groups are inside the replayed CUDA graph and partially mis-bucket by
-name (e.g. base "rmsnorm" 6.38 vs lora 0.14 is a naming-split artifact — merged elem+norm is
-base 8.11 vs lora 8.05 ≈ flat). Base per-group decode numbers are therefore not split here;
-the trustworthy decode comparators are the step-wall (29.8 vs 42.0 µs/layer) and the
-LoRA-added rows (which run outside the base graph).
+## ② MoE sublayer (decode bs64, µs/layer GPU-active; base / LoRA-single / LoRA-two)
 
-## ② MoE sublayer (decode bs64, µs/layer GPU-active)
-
-| group | base | LoRA | Δ | optimization | url |
+| group | base | LoRA single | LoRA two | optimization | url |
 |---|---|---|---|---|---|
-| expert GEMM (bmm cubin; base = fused MoE runner) | * | 6.39 | ~ | — | |
-| routing | * | 0.77 | ~ | — | |
-| finalize | * | 0.53 | ~ | — | |
-| align/sort (Triton) | 0 | 2.50 | +2.50 | align/sort fusion + routing reuse | ✅ [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea) · ✅ [opt5](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) |
-| topk/pack | 0 | 0.71 | +0.71 | fused topk+pack | ✅ opt2 (flag-only) |
-| LoRA MoE shrink (routed) | 0 | 1.97 | +1.97 | | |
-| fused_moe (LoRA-Δ B-expand) | 0 | 1.44 | +1.44 | | |
-| LoRA MoE expand (routed) | 0 | 0.64 | +0.64 | | |
-| permute (standalone) | 0 | 0.87 | +0.87 | | |
-| activation (standalone) | 0 | 0.44 | +0.44 | | |
-| allreduce/comm | 6.91 | 9.18 | +2.28 | — (sync-point cost; see host view) | |
-| elem/copy/norm (merged, see *) | 8.11 | 8.05 | −0.06 | — | |
+| expert GEMM (bmm cubin; base = fused MoE runner) | 39.2 | 37.8 | 39.6 | — | |
+| routing | 6.4 | 4.8 | 4.5 | — | |
+| finalize | 4.9 | 2.9 | 2.9 | — | |
+| align/sort (Triton) | 0 | 10.9 | 14.2 | align/sort fusion + routing reuse; two-stream pays +3.4 side-stream bookkeeping | ✅ [opt1](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea) · ✅ [opt5](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) |
+| topk/pack | 0 | 4.3 | 4.1 | fused topk+pack | ✅ opt2 (flag-only) |
+| LoRA MoE shrink (routed) | 0 | 10.2 | 11.1 | | |
+| fused_moe (LoRA-Δ B-expand) | 0 | 7.8 | 7.9 | | |
+| LoRA MoE expand (routed) | 0 | 3.4 | 3.6 | | |
+| permute (standalone) | 0 | 4.5 | 5.0 | | |
+| activation (standalone) | 0 | 2.7 | 2.5 | | |
+| allreduce/comm | 27.1 | 20.4 | 26.9 | — (sync-point cost; see host view) | |
+| elem/copy/norm (merged — naming differs across captures) | 11.5 | 8.3 | 13.2 | — | |
+| **TOTAL GPU-active** | **130.9** | **180.5** | **195.0** | | |
 
 ## Prefill view (µs/layer-forward, 4096-tok chunk, graph-on bs64 TP0 — production path)
 
@@ -130,8 +127,15 @@ Notes: all SHIPPED perf (decode +11~12%, prefill +14~18% cumulative) comes from 
 flag-gated OFF on PR #8 — enable condition: prefill no longer host-bound (= opt8's target).
 FP8/NVFP4 byte-identical throughout.
 
-Method note: decode numbers are one steady `step[DECODE bs=64]` window (by-stage profile,
-`dev/profile_decode_bystage.sh` — `--profile-start-step` is an ABSOLUTE scheduler counter and
-cannot reach a decode window with the dev recipe); prefill numbers are 12 steady mid-run
-`step[EXTEND bs=2 toks=4096]` chunks. allreduce kept as its own row (spin-inflated at prefill —
-treated as a host symptom, not GPU work).
+Method note: decode numbers = whole by-stage DECODE trace kernel totals ÷ (12 steps × 48
+layers) (`dev/profile_decode_bystage.sh`; `--profile-start-step` is an ABSOLUTE scheduler
+counter and cannot reach a decode window with the dev recipe). Do NOT window graph-replay
+kernels with CPU NVTX spans — replayed kernels lag the host span and get diluted (an earlier
+revision of this table undercounted expert GEMM 6.4 vs the true 39.6 µs/layer that way);
+GPU-aligned spans fragment under the two-stream capture. Sanity: fmha = 48 calls/step in all
+three cells. "GPU-active" = sum of kernel durations across streams (concurrency-blind — the
+graph runs multiple streams, so it exceeds step-wall). Bench numbers taken DURING by-stage
+profiling are invalid (profiler overhead: decode 1313 tok/s vs the real 7028/8103) — wall
+verdicts come from `3_run_benchmark`/matrix runs only. Prefill numbers are 12 steady mid-run
+`step[EXTEND bs=2 toks=4096]` chunks (eager path — no graph, CPU spans are safe there).
+allreduce kept as its own row (spin-inflated at prefill — a host symptom, not GPU work).
