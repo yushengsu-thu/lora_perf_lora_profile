@@ -232,8 +232,17 @@ loop was 183.6 µs; the chunked rewrite (per-row hoist, 8B vector Δ loads + 8B 
 stores) won 54%. opt6's capture-drop is subsumed (no aux write exists at all).
 Debug ladder addenda: adapter requirement (`ThreadEpilogueOp`/`EpilogueTile` aliases,
 pointer-type stride template param), detached `setsid` runs for flaky-uplink test cycles.
-Next: P3 gather prologue (cpasync mainloop — TMA cannot gather; absorbs permute 180 µs/layer,
-the dominant prize) → P4 integrate (prefill-only dispatch + dual-layout weights).
+**P3 DONE 2026-06-12 (`f7e5d51`) — the 180 µs "prize" fell to a 30-line kernel.**
+Value-audit first: the dev permute moves only ~8 µs of HBM traffic — its 180 µs is a
+decode-shaped launch grid (128 blocks, 11% occupancy) starved at prefill shapes. No cpasync
+mainloop surgery needed: a properly-gridded 16B-vectorized row gather runs **12.7 µs**
+(bitwise vs torch index_select). **Full fold pipeline (gather 12.7 + fold GEMM 85.0) =
+101.5 µs vs the 270 µs it replaces (permute 180 + GEMM1 57 + activation 33) — −62%,
+gate ≤189 PASS.** All three opt7 kernel pieces (P1 parity, P2 fold, P3 gather) are done.
+Next: **P4 integrate** — Bf16LoraLauncher branch behind SGLANG_OPT_BF16_MOE_GEMM1_FOLD
+(+_DUAL_LAYOUT weight re-prep at load: plain [E,2I,K] from the pre-shuffle source),
+prefill-only dispatch, down-shrink via the opt6 map path → acc → bench triplet+matrix →
+upload opt7/.
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
   (= fused permute — **scope upgrade from the original V1 epilogue-only framing**, justified
