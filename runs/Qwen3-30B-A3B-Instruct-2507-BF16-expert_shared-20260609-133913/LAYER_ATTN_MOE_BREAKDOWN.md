@@ -117,6 +117,25 @@ must set the flag `=0` explicitly (unset = ON = non-measurement).
 | **opt7-step0** | bf16 unfused-cubin probe | — (diagnostic, [d12fe74a7](https://github.com/yushengsu-thu/sglang/commit/d12fe74a7)) | diagnostic only | ✅ **DONE 2026-06-11: route (b) CONFIRMED** — unfused Swiglu GEMM1 cubin = −1 at every tile, in BlockMajorK AND MajorK; Identity variant also absent; fused sanity passes (144 configs). Same wall as NVFP4. See `opt7_step0/PROBE.md` |
 | **opt7** | in-MoE fold: CUTLASS grouped GEMM, gather-prologue + SwiGLU·LoRA EVT epilogue | `SGLANG_OPT_BF16_MOE_GEMM1_FOLD` (+ `SGLANG_OPT_BF16_MOE_DUAL_LAYOUT`) | high (new bf16-only kernel) — ✦ **DONE 2026-06-12 — kernels all-gates-PASS, e2e neutral.** P1 65.6µs✅ · P2 fold bitwise+84.8µs✅ · P3 gather 12.7µs (permute 180µs was a decode-shaped grid)✅ · pipeline 101.5 vs 270µs (−62% kernel)✅ · **P4 e2e: acc fold-ON at the noise floor (KL 0.004132) but bench +1~3% = noise — the kernel win is absorbed by the ~50% host-bound prefill wall (15.9k launches). Flags default OFF; code on PR#4, becomes the payoff once prefill is host-unbound (piecewise graph / launch batching = the next structural lever).** See `opt7/OPT7.md`;: [`opt7_design/OPT7_DESIGN.md`](opt7_design/OPT7_DESIGN.md) (phases P0–P4, exact fold semantics, P1 57µs parity gate); P0 skeleton [1a82c2111](https://github.com/yushengsu-thu/sglang/commit/1a82c2111) — CUTLASS 4.5 wired (probe [4,5,1]), reference fold kernel PASS (rel err 3.8e-3) | permute 180 + activation 33 µs/layer + gate_up HBM round-trip; **de-risk: prefill-only + dual-layout gemm1 weights (+9.7 GB/rank, affordable on GB300 288 GB — decode keeps the tuned cubin, zero regression)** |
 
+## Commit & code-size ledger (sglang PR #4 branch, base `526e0ae22` → `dfa3493c9`)
+
+| opt | commits | lines | verdict |
+|---|---|---|---|
+| **opt1** align/sort fusion | [`869882a3a`](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea) | **+14/−5** (1 file) | ✅ decode +11% |
+| **opt2** topk+pack | none (flag-only) | **0** | ✅ decode +5.6% |
+| **opt3** lean info | [`1536c6e4e`](https://github.com/yushengsu-thu/sglang/commit/1536c6e4e65515f5ee7403c48b0726d55307d430) | +30/−11 (2 files) | ✗ no win (kept, harmless) |
+| **opt4** two-stream prefill | none (flag experiment) | **0** | ✗ −8%, NOT adopted |
+| **opt5** routing reuse | [`850faa87f`](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) | **+20** (2 files) | ✅ prefill +8~11% |
+| **opt6** act-capture drop | [`cf9d0e55e`](https://github.com/yushengsu-thu/sglang/commit/cf9d0e55e) + [`f4971ea4e`](https://github.com/yushengsu-thu/sglang/commit/f4971ea4e) | +183/−34 (5 files) | ✗ sub-noise, default-OFF (plumbing feeds opt7) |
+| **opt7-step0** probe | [`d12fe74a7`](https://github.com/yushengsu-thu/sglang/commit/d12fe74a7) | +53 | route (b) confirmed |
+| **opt7** P0–P4 (22 commits) | P0 [`1a82c2111`](https://github.com/yushengsu-thu/sglang/commit/1a82c2111)(+176) · P1 [`f7a475b57`](https://github.com/yushengsu-thu/sglang/commit/f7a475b57)(+229, +8 fixups) · P2 [`15a224a18`](https://github.com/yushengsu-thu/sglang/commit/15a224a18)(+411) + vec [`f2247b5a8`](https://github.com/yushengsu-thu/sglang/commit/f2247b5a8)(+63/−16) · P3 [`f7e5d5119`](https://github.com/yushengsu-thu/sglang/commit/f7e5d5119)(+64) · P4 [`22feb0e73`](https://github.com/yushengsu-thu/sglang/commit/22feb0e73)(+43) + [`022d547e2`](https://github.com/yushengsu-thu/sglang/commit/022d547e2)(+142/−26) + 3 fixups | **net +1,462/−34** (13 files) | ✦ kernel −62% all-gates-PASS; e2e host-bound, default-OFF |
+| **TOTAL** | ~28 commits | **+1,506 / −50, 14 files** | |
+
+Notes: all SHIPPED perf (decode +11~12%, prefill +14~18% cumulative) comes from **34 lines**
+(opt1 + opt5); opt2/opt4 were zero-code. 97% of the lines (opt7) are the CUTLASS fold asset —
+correctness-proven, flag-gated OFF, zero-risk, waiting on the host-bound wall. Only −50
+deletions total = strictly additive; FP8/NVFP4 untouched throughout.
+
 ## Recommended order (decode, bs16)
 1. **in-MoE LoRA fold** — biggest structural win. Corrected accounting (2026-06-11): the fold-only
    decode remainder is **~5.6 µs/layer** (activation 3.2 + permute 2.4) + 2 launches — `fused_moe`
