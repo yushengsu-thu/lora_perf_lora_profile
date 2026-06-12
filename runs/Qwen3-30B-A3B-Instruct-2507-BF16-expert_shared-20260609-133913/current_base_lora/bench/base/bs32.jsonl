@@ -1,1 +1,1 @@
-{"run_name": "default", "batch_size": 32, "input_len": 2048, "output_len": 2048, "latency": 9.8121, "input_throughput": 192148.21, "output_throughput": 6919.63, "overall_throughput": 13358.2, "last_ttft": 0.3411, "last_gen_throughput": 6856.02, "acc_length": -1.0, "cache_hit_rate": null}
+{"run_name": "default", "batch_size": 32, "input_len": 2048, "output_len": 2048, "latency": 9.8394, "input_throughput": 190476.07, "output_throughput": 6901.91, "overall_throughput": 13321.13, "last_ttft": 0.3441, "last_gen_throughput": 6831.04, "acc_length": -1.0, "cache_hit_rate": null}
