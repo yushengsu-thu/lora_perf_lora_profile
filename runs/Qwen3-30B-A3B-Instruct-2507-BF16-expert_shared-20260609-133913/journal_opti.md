@@ -284,6 +284,25 @@ Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 **Diagram** (current path vs fold, with measured per-layer costs):
 [`in_moe_fold_before_after.png`](in_moe_fold_before_after.png)
 
+## Commit & code-size ledger (sglang PR #4 branch, base `526e0ae22` → `dfa3493c9`)
+
+| opt | commits | lines | verdict |
+|---|---|---|---|
+| **opt1** align/sort fusion | [`869882a3a`](https://github.com/yushengsu-thu/sglang/commit/869882a3ab87ec3c1983f8808d382ef2aa1d0cea) | **+14/−5** (1 file) | ✅ decode +11% |
+| **opt2** topk+pack | none (flag-only) | **0** | ✅ decode +5.6% |
+| **opt3** lean info | [`1536c6e4e`](https://github.com/yushengsu-thu/sglang/commit/1536c6e4e65515f5ee7403c48b0726d55307d430) | +30/−11 (2 files) | ✗ no win (kept, harmless) |
+| **opt4** two-stream prefill | none (flag experiment) | **0** | ✗ −8%, NOT adopted |
+| **opt5** routing reuse | [`850faa87f`](https://github.com/yushengsu-thu/sglang/commit/850faa87fbcc7d54210bc86866d2f9b3ecf4abce) | **+20** (2 files) | ✅ prefill +8~11% |
+| **opt6** act-capture drop | [`cf9d0e55e`](https://github.com/yushengsu-thu/sglang/commit/cf9d0e55e) + [`f4971ea4e`](https://github.com/yushengsu-thu/sglang/commit/f4971ea4e) | +183/−34 (5 files) | ✗ sub-noise, default-OFF (plumbing feeds opt7) |
+| **opt7-step0** probe | [`d12fe74a7`](https://github.com/yushengsu-thu/sglang/commit/d12fe74a7) | +53 | route (b) confirmed |
+| **opt7** P0–P4 (22 commits) | P0 [`1a82c2111`](https://github.com/yushengsu-thu/sglang/commit/1a82c2111)(+176) · P1 [`f7a475b57`](https://github.com/yushengsu-thu/sglang/commit/f7a475b57)(+229, +8 fixups) · P2 [`15a224a18`](https://github.com/yushengsu-thu/sglang/commit/15a224a18)(+411) + vec [`f2247b5a8`](https://github.com/yushengsu-thu/sglang/commit/f2247b5a8)(+63/−16) · P3 [`f7e5d5119`](https://github.com/yushengsu-thu/sglang/commit/f7e5d5119)(+64) · P4 [`22feb0e73`](https://github.com/yushengsu-thu/sglang/commit/22feb0e73)(+43) + [`022d547e2`](https://github.com/yushengsu-thu/sglang/commit/022d547e2)(+142/−26) + 3 fixups | **net +1,462/−34** (13 files) | ✦ kernel −62% all-gates-PASS; e2e host-bound, default-OFF |
+| **TOTAL** | ~28 commits | **+1,506 / −50, 14 files** | |
+
+Notes: all SHIPPED perf (decode +11~12%, prefill +14~18% cumulative) comes from **34 lines**
+(opt1 + opt5); opt2/opt4 were zero-code. 97% of the lines (opt7) are the CUTLASS fold asset —
+correctness-proven, flag-gated OFF, zero-risk, waiting on the host-bound wall. Only −50
+deletions total = strictly additive; FP8/NVFP4 untouched throughout.
+
 ## 6. Index
 
 - `LAYER_ATTN_MOE_BREAKDOWN.md` — per-layer decode cost map (opt1/2/3 links).
