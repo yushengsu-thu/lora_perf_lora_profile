@@ -221,9 +221,19 @@ calibration: NoSmem full-width epilogue 84.4 µs vs TMA 65.6 µs (+19 µs) — t
 version stores HALF the bytes and replaces the 33 µs activation kernel + ~6 µs gate_up
 round-trip, so net fold value stays ~+20 µs/layer even before tuning. P1-parity config
 kept on the TMA epilogue meanwhile.
-Next: P2 step2 — `bf16_fold_epilogue.hpp` fork (pair-fold + Δ aux + silu, D[R,768]),
-validate vs the P0 ref kernel, perf vs (P1 GEMM + activation) total; then P3 gather
-prologue (cpasync mainloop — TMA cannot gather), P4 integrate.
+**P2 DONE 2026-06-12 (`f2247b5a8`) — fold epilogue WORKS & WINS**:
+`sgl_bf16_fold_epilogue.hpp` (fork of the Sm100 NoSmem array collective, wrapped in
+`Sm100TmaWarpSpecializedAdapter` exactly like the stock WarpSpecialized variant) folds the
+interleaved (g,u) accumulator pairs + half-contiguous LoRA Δ (per-row gather via the
+per-group perm2exp segment pointers) + silu directly in the epilogue, half-width D[R,768].
+**Correctness: BITWISE identical to the P0 ref kernel (max_abs=0.0). Perf: 84.8 µs vs the
+≤99 µs net-win gate (P1 GEMM 65.6 + activation 33 it replaces) — PASS.** v1 scalar fold
+loop was 183.6 µs; the chunked rewrite (per-row hoist, 8B vector Δ loads + 8B vector
+stores) won 54%. opt6's capture-drop is subsumed (no aux write exists at all).
+Debug ladder addenda: adapter requirement (`ThreadEpilogueOp`/`EpilogueTile` aliases,
+pointer-type stride template param), detached `setsid` runs for flaky-uplink test cycles.
+Next: P3 gather prologue (cpasync mainloop — TMA cannot gather; absorbs permute 180 µs/layer,
+the dominant prize) → P4 integrate (prefill-only dispatch + dual-layout weights).
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
   (= fused permute — **scope upgrade from the original V1 epilogue-only framing**, justified
