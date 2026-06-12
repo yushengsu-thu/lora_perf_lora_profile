@@ -331,6 +331,33 @@ Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
   acc) → if code is needed, an additive flag-gated relaxation of condition 7
   (`SGLANG_OPT_LORA_PIECEWISE_PREFILL`) → full single×two matrix + acc + journal/breakdown sync.
 
+## 2026-06-12 — opt8 implementation ladder (piecewise CUDA graph for LoRA prefill; IN PROGRESS)
+
+Probe = `dev/probe_opt8_piecewise.sh` (off/on A/B via `--enforce-piecewise-cuda-graph`,
+zero-config opt-in; capture evidence + coherence + triplet). Iterations:
+
+| step | break hit | fix | commit |
+|---|---|---|---|
+| step0 probe | dynamo hard-fail: flashinfer JIT logger (`logging.Logger ... Unsupported`) inside the traced `trtllm_bf16_routed_moe` call | — (work list) | — |
+| step1 | ″ | bf16 trtllm MoE **custom-op wrappers** (mirror the fp8 pattern; raw flashinfer call JIT-loads+logs in-trace) — also fixes the no-lora bf16 cell | `77de4b1be` |
+| step1 probe | trace passes flashinfer, compiles 7/50 sizes, then dynamo hard-fail #2: LoRA Triton dispatch → `get_moe_configs` → `torch.cuda.get_device_name()` returns str | — | — |
+| step2 | ″ (whole dispatch subtree is untraceable host Python) | **MoE-LoRA dispatch as ONE opaque split op** (`unified_moe_lora_with_output`, RadixAttention escape-hatch pattern: custom op + `register_split_op`, layer registry + forward-context padding trim; also keeps capture-time `lora_ids=[None]` out of the graphs) | `6e3eb2ac2` |
+| step2 probe | trace + compile pass; **`split_module` fails: a `torch.cuda.Stream` value crosses a partition boundary** | TORCH_LOGS=graph_code dump pinpointed the dense-LoRA side-stream forwards (`trtllm_lora_temp/attention.py`) | — |
+| step3 | ″ | central gate: `is_two_stream_active` forced False under the piecewise forward — all 5 side-stream forwards fall back to their serial saved-originals | `7da3230c2` |
+| step4 | capture: `prepare_lora_batch` → `len(None)` | upstream bug: capture batch hardcodes `lora_ids=None` after computing `[None]*bs` | `bc50afa7d` |
+| step5/6 | capture: triton `IncompatibleTypeErrorImpl` — `max_len` kernel arg specialized as pointer | capture batch's `extend_seq_lens_cpu` is a CPU tensor (scheduler: list); int-coerce at both call sites (`triton_backend`, `base_backend._add_moe_lora_info`) | `c8304b4af`, `e7ef9b201` |
+| step6 probe | **MILESTONE: full piecewise capture SUCCEEDED with LoRA (852 s, 50 sizes) + server fired up (21:37)**; first real request → **runtime recompilation** → `PCG capture stream is not set` assert | FX inputs show dense/embedding LoRA layers consume per-batch `lora_backend.batch_info` tensors in-graph (fresh allocations per batch → guard miss + stale storage). step7 = persistent piecewise lora buffers (mirror decode's `cuda_graph_batch_info`; token-level buffers sized `piecewise_cuda_graph_max_tokens`); step7a (traced gate reads only context none-ness) committed | step7a done |
+
+Definition of done: ON-variant capture end + coherence + triplet (prefill is the headline,
+ceiling ~3.6×) → acc (KL at floor; also guards against silently-skipped LoRA — lora-vs-no-lora
+diff would collapse) → full single×two matrix → productize the gate (flag-gated condition-7
+relaxation, `SGLANG_OPT_LORA_*`) → PR + runs/ + journal/breakdown sync.
+
+Ops discipline (learned 2026-06-12 the hard way): pod drivers are strictly SERIAL — launching
+a second driver while one runs kill_all's the first mid-bench (corrupted one probe run + one
+single-stream profile run). Also: bench numbers taken during by-stage profiling are invalid
+(profiler overhead ~5×); `--profile-start-step` is an ABSOLUTE scheduler counter.
+
 ## 2026-06-12 — Branch restructure: opt6/opt7 moved off the working branch into standalone PRs
 
 The working branch `qwen3-30b-a3b-2507-bf16` was **reset to opt5 (`850faa87f`)** — it now carries
