@@ -8,6 +8,11 @@ table is preserved in git history.
 
 **Decode bs64, per layer: base step-wall 29.8 µs → LoRA 42.0 µs (+41%); GPU-active 15.9 → 44.4 µs.**
 (bench ITL: 5.46 → 7.90 ms/step; decode tok/s ratio 69.1%.)
+**Decode numbers are with two-stream ON** (default, baked into the cuda-graph capture): the
+LoRA-Δ chain is already overlapped to the extent the mechanism allows (single→two decode
++15~21% wall, historical matrices), and overlap removes ~0 GPU-active per row — so NO decode
+row below has further "hide it with two-stream instead of optimizing" headroom; the overlap
+is already in the baseline.
 **Prefill (4096-tok chunk), per layer-forward: base wall 525 µs → LoRA 4558 µs (8.7×; tok/s ratio 20.9%).**
 
 ## ① Attention sublayer (decode bs64, µs/layer GPU-active)
@@ -46,22 +51,30 @@ LoRA-added rows (which run outside the base graph).
 
 ## Prefill view (µs/layer-forward, 4096-tok chunk, graph-on bs64 TP0 — production path)
 
-| group | base | LoRA | Δ | addressed by |
-|---|---|---|---|---|
-| **allreduce/comm** | 256 | **3654** | **+3398** | **host-side skew** (see host view) — **opt8 target** |
-| permute (standalone) | 0 | 176 | +176 | (kernel asset on [PR#8](https://github.com/yushengsu-thu/sglang/pull/8), default-OFF, host-bound-blocked) |
-| fused_moe (LoRA-Δ B-expand) | 0 | 100 | +100 | |
-| LoRA MoE shrink | 0 | 58 | +58 | |
-| align/sort (Triton re-sort) | 0 | 57 | +57 | ✅ opt5 took it 4×→2×/layer (was ~119) |
-| LoRA qkv_b expand | 0 | 38 | +38 | |
-| LoRA MoE expand | 0 | 36 | +36 | |
-| LoRA shrink A | 0 | 33 | +33 | |
-| activation (standalone) | 0 | 31 | +31 | (PR#8 fold asset, same condition) |
-| LoRA expand B | 0 | 30 | +30 | |
-| topk/pack | 0 | 11 | +11 | ✅ opt2 |
-| expert GEMM (bmm) | 94 | 109 | +15 | — |
-| base compute (fmha/nvjet/norm/finalize/routing) | 124 | 116 | −8 | — |
-| **wall total** | **525** | **4558** | **+4033** | |
+`two-stream?` = can this row be hidden by two-stream overlap instead of being optimized?
+**✗ for EVERY prefill row — measured, not assumed**: (a) prefill is serial by design
+(`SGLANG_TWO_STREAM_MAX_TOKENS=256` < 4096-tok chunks; this round's prefill trace: **100% of
+kernel time on the single main stream, side-stream = 0**); (b) raising the gate to cover
+prefill was **opt4: prefill −8~9%, REJECTED** (sync overhead + SM contention exceed the
+overlap); (c) the dominant row is an allreduce sync point — overlap cannot hide a collective,
+and overlap removes no launches on a host-bound path.
+
+| group | base | LoRA | Δ | two-stream? | addressed by |
+|---|---|---|---|---|---|
+| **allreduce/comm** | 256 | **3654** | **+3398** | ✗ (sync point) | **host-side skew** (see host view) — **opt8 target** |
+| permute (standalone) | 0 | 176 | +176 | ✗ (opt4) | (kernel asset on [PR#8](https://github.com/yushengsu-thu/sglang/pull/8), default-OFF, host-bound-blocked) |
+| fused_moe (LoRA-Δ B-expand) | 0 | 100 | +100 | ✗ (opt4) | |
+| LoRA MoE shrink | 0 | 58 | +58 | ✗ (opt4) | |
+| align/sort (Triton re-sort) | 0 | 57 | +57 | ✗ (opt4) | ✅ opt5 took it 4×→2×/layer (was ~119) |
+| LoRA qkv_b expand | 0 | 38 | +38 | ✗ (opt4) | |
+| LoRA MoE expand | 0 | 36 | +36 | ✗ (opt4) | |
+| LoRA shrink A | 0 | 33 | +33 | ✗ (opt4) | |
+| activation (standalone) | 0 | 31 | +31 | ✗ (opt4) | (PR#8 fold asset, same condition) |
+| LoRA expand B | 0 | 30 | +30 | ✗ (opt4) | |
+| topk/pack | 0 | 11 | +11 | ✗ (opt4) | ✅ opt2 |
+| expert GEMM (bmm) | 94 | 109 | +15 | — | — |
+| base compute (fmha/nvjet/norm/finalize/routing) | 124 | 116 | −8 | — | — |
+| **wall total** | **525** | **4558** | **+4033** | | |
 
 LoRA compute extras sum to ~+570 µs/layer; **allreduce spin is +3398 µs/layer = 83% of the
 lora prefill wall**. The host-bound cost manifests as comm spin (every sync point waits for
