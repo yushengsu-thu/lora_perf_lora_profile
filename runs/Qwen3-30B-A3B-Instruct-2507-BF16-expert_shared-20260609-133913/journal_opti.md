@@ -239,10 +239,17 @@ mainloop surgery needed: a properly-gridded 16B-vectorized row gather runs **12.
 (bitwise vs torch index_select). **Full fold pipeline (gather 12.7 + fold GEMM 85.0) =
 101.5 µs vs the 270 µs it replaces (permute 180 + GEMM1 57 + activation 33) — −62%,
 gate ≤189 PASS.** All three opt7 kernel pieces (P1 parity, P2 fold, P3 gather) are done.
-Next: **P4 integrate** — Bf16LoraLauncher branch behind SGLANG_OPT_BF16_MOE_GEMM1_FOLD
-(+_DUAL_LAYOUT weight re-prep at load: plain [E,2I,K] from the pre-shuffle source),
-prefill-only dispatch, down-shrink via the opt6 map path → acc → bench triplet+matrix →
-upload opt7/.
+**P4 DONE 2026-06-12 (`22feb0e73`..`dfa3493c9`) — integrated, correct, e2e-neutral.**
+acc flags-off PASS (inert); **acc fold-ON PASS at the noise floor (KL 0.004132 < 0.004243)**
+— the full pipeline is numerically correct in the real server. **But the bench matrix is
++1~3% prefill = noise**: the fold's −168µs/layer of kernel time (~7% of prefill wall) is
+absorbed by the ~50% host-bound GPU idle; it removes only 2–3 of ~40+ launches/layer.
+**Structural conclusion: per-layer kernel fusion has hit the host-bound wall. The next
+prefill lever is host-side (piecewise CUDA graph for prefill / launch batching) — at which
+point opt7's −62% kernel time pays out immediately.** Flags default OFF (off =
+byte-identical); code kept on PR #4. e2e debug ladder (3 acc rounds): FP4-launcher edit
+leak (caught at compile, restored verbatim), segment layout → authoritative cta map,
+perm2exp pad rows are UNINITIALIZED (not −1) → bound-check. Full report: `opt7/OPT7.md`.
 Replace `permute + GEMM1 + activation` with **one CUTLASS grouped GEMM**:
 - **Prologue**: gather A-operand rows via `expanded_idx_to_permuted_idx`
   (= fused permute — **scope upgrade from the original V1 epilogue-only framing**, justified
