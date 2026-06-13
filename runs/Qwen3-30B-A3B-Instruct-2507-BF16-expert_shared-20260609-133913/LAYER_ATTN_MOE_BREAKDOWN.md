@@ -103,7 +103,7 @@ the slowest rank's CPU dispatch), not as visible idle.
 
 | # | what | flag | dtype scope | status |
 |---|---|---|---|---|
-| **opt8** | piecewise CUDA graph for LoRA prefill — `server_args` condition 7 force-disables piecewise whenever `enable_lora`; runner already handles `lora_ids`, token ladder reaches 4096 | probe: `--enforce-piecewise-cuda-graph` (zero-code); productize as `SGLANG_OPT_LORA_*` if code needed | **common** (host/Python level; fp8/nvfp4 prefill is the same eager pipeline) | step0 probe queued (`dev/probe_opt8_piecewise.sh`) |
+| **opt8** | piecewise CUDA graph for LoRA prefill (condition 7 force-disables it) — 14-round implementation: flashinfer custom-op wrappers, MoE dispatch + embedding + ALL dense LoRA applies as split ops, capture-batch fixes, persistent piecewise batch_info with capacity-constant host ints | opt-in `--enforce-piecewise-cuda-graph`, default OFF | **common** | ✗ **無 e2e 收益 (2026-06-13): capture/replay/bench/acc all work, but prefill ON/OFF = 62% — ~6 split ops/layer reopen the host gaps + per-op copies. Payoff requires in-graph traceable LoRA kernels (tensor-borne metadata; future opt). [results](opt8-probe/)** |
 
 ## Commit & code-size ledger (history, incl. no-e2e-win items)
 

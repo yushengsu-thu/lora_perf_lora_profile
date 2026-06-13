@@ -1,0 +1,41 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/huggingface_hub/constants.py:277: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+  warnings.warn(
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+max_running_requests_per_dp=4096
+dp_size=1
+skip_max_running_requests_threshold=4096
+skip_token_capacity_threshold=8923648
+======== Warmup Begin ========
+Warmup with batch_size=[64]
+#Input tokens: 65536
+#Output tokens: 1024
+batch size: 64
+input_len: 1024
+output_len: 16
+latency: 1.80 s
+input throughput: 38873.58 tok/s
+output throughput: 9019.31 tok/s
+last_ttft: 1.69 s
+last generation throughput: 4617.02 tok/s
+======== Warmup End   ========
+
+#Input tokens: 131072
+#Output tokens: 131072
+batch size: 64
+input_len: 2048
+output_len: 2048
+latency: 19.50 s
+input throughput: 39435.63 tok/s
+output throughput: 8100.46 tok/s
+last_ttft: 3.32 s
+last generation throughput: 7915.86 tok/s
+
+Results are saved to /tmp/opt8_probe/off/bs64.jsonl
+
+Input lens: [2048]. Output lens: [2048].
+|   batch size |   input len |   latency (s) |   input throughput (tok/s) |   output throughput (tok/s) | acc length   |   ITL (ms) |   input cost ($/1M) |   output cost ($/1M) | cache hit rate   |
+|--------------|-------------|---------------|----------------------------|-----------------------------|--------------|------------|---------------------|----------------------|------------------|
+|           64 |        2048 |          19.5 |                    39435.6 |                     8100.46 | n/a          |        7.9 |                0.04 |                 0.14 | n/a              |
+
