@@ -1,0 +1,41 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/huggingface_hub/constants.py:277: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+  warnings.warn(
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+max_running_requests_per_dp=4096
+dp_size=1
+skip_max_running_requests_threshold=4096
+skip_token_capacity_threshold=4515776
+======== Warmup Begin ========
+Warmup with batch_size=[16]
+#Input tokens: 16384
+#Output tokens: 256
+batch size: 16
+input_len: 1024
+output_len: 16
+latency: 11.85 s
+input throughput: 1414.14 tok/s
+output throughput: 981.47 tok/s
+last_ttft: 11.59 s
+last generation throughput: -1.00 tok/s
+======== Warmup End   ========
+
+#Input tokens: 32768
+#Output tokens: 32768
+batch size: 16
+input_len: 2048
+output_len: 2048
+latency: 38.46 s
+input throughput: 21172.51 tok/s
+output throughput: 887.73 tok/s
+last_ttft: 1.55 s
+last generation throughput: 883.41 tok/s
+
+Results are saved to /tmp/dev_run/lora/bench/bs16.jsonl
+
+Input lens: [2048]. Output lens: [2048].
+|   batch size |   input len |   latency (s) |   input throughput (tok/s) |   output throughput (tok/s) | acc length   |   ITL (ms) |   input cost ($/1M) |   output cost ($/1M) | cache hit rate   |
+|--------------|-------------|---------------|----------------------------|-----------------------------|--------------|------------|---------------------|----------------------|------------------|
+|           16 |        2048 |         38.46 |                    21172.5 |                      887.73 | n/a          |      18.02 |                0.07 |                 1.25 | n/a              |
+
